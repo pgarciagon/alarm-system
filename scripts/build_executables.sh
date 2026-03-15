@@ -114,7 +114,6 @@ echo "--- Building alarm_installer (combined installer) ---"
 pyinstaller \
     --noconfirm \
     --clean \
-    ${UAC} \
     scripts/alarm_installer.spec
 
 echo ""
