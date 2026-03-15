@@ -19,11 +19,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import websockets
-# Support both websockets v12 (legacy API) and v14+ (new API)
 try:
-    from websockets.server import WebSocketServerProtocol  # legacy/v12
+    from websockets.server import ServerConnection as _WS  # websockets v14+
 except ImportError:
-    WebSocketServerProtocol = object  # type: ignore[assignment,misc]
+    from websockets.server import _WS as _WS  # type: ignore[assignment] # v12
 
 # Make the package importable when run as __main__ from the repo root
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -74,7 +73,7 @@ def _setup_logging(log_file: str) -> logging.Logger:
 class ClientEntry:
     __slots__ = ("ws", "last_heartbeat", "is_down")
 
-    def __init__(self, ws: WebSocketServerProtocol) -> None:
+    def __init__(self, ws: _WS) -> None:
         self.ws = ws
         self.last_heartbeat: float = time.monotonic()
         self.is_down: bool = False
@@ -117,7 +116,7 @@ class AlarmServer:
     # Per-connection handler
     # ------------------------------------------------------------------
 
-    async def _handle_client(self, ws: WebSocketServerProtocol) -> None:
+    async def _handle_client(self, ws: _WS) -> None:
         room: Optional[str] = None
         remote = ws.remote_address
         self.log.info("New connection from %s", remote)
@@ -154,7 +153,7 @@ class AlarmServer:
     # Message handlers
     # ------------------------------------------------------------------
 
-    async def _on_register(self, ws: WebSocketServerProtocol, msg: RegisterMsg) -> str:
+    async def _on_register(self, ws: _WS, msg: RegisterMsg) -> str:
         room = msg.room
         async with self._lock:
             existing = self._clients.get(room)
