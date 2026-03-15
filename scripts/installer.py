@@ -189,9 +189,13 @@ def _create_shortcut(lnk_path: Path, target_exe: Path, arguments: str,
         return False
 
 
-def create_shortcuts(exe: Path, role: str, config_path: Path) -> Tuple[bool, bool]:
+def create_shortcuts(exe: Path, role: str, config_path: Path,
+                     room_name: Optional[str] = None) -> Tuple[bool, bool]:
     """Create Desktop and Start Menu shortcuts. Returns (desktop_ok, startmenu_ok)."""
-    role_de = "Alarm Server" if role == "server" else "Alarm Client"
+    if role == "server":
+        role_de = "Alarm Server"
+    else:
+        role_de = f"Alarm Client — {room_name}" if room_name else "Alarm Client"
     desc = f"Alarmsystem — {role_de}"
 
     # Copy icon to install dir
@@ -282,6 +286,14 @@ def _bundle_file(rel: str) -> Optional[Path]:
     return p if p.exists() else None
 
 
+def _sanitize_name(name: str) -> str:
+    """Turn a room name like 'Zimmer 1' into a safe filename slug like 'zimmer_1'."""
+    import re
+    slug = name.lower().strip()
+    slug = re.sub(r'[^a-z0-9äöüß]+', '_', slug)
+    return slug.strip('_') or 'client'
+
+
 def _copy_exe(role: str, dest: Path) -> Path:
     """Copy the appropriate exe to *dest* and return the launch target.
 
@@ -301,21 +313,30 @@ def _copy_exe(role: str, dest: Path) -> Path:
         target = dest / exe_name
         src = _bundle_file(exe_name)
         if src and src != target:
-            shutil.copy2(src, target)
+            try:
+                shutil.copy2(src, target)
+            except PermissionError:
+                pass  # exe locked by running instance — already in place
         else:
-            shutil.copy2(sys.executable, target)
+            try:
+                shutil.copy2(sys.executable, target)
+            except PermissionError:
+                pass  # exe locked by running instance — already in place
     else:
         # Unfrozen (dev): create a .bat launcher instead
         repo_root = Path(__file__).parent.parent.resolve()
         python_exe = Path(sys.executable).resolve()
         bat_name = "alarm_server.bat" if role == "server" else "alarm_client.bat"
         target = dest / bat_name
-        target.write_text(
-            f'@echo off\r\n'
-            f'cd /d "{repo_root}"\r\n'
-            f'"{python_exe}" -m {module} %*\r\n',
-            encoding="utf-8",
-        )
+        try:
+            target.write_text(
+                f'@echo off\r\n'
+                f'cd /d "{repo_root}"\r\n'
+                f'"{python_exe}" -m {module} %*\r\n',
+                encoding="utf-8",
+            )
+        except PermissionError:
+            pass  # bat locked — already in place
 
     # Also copy bundled assets (sound + icons)
     assets_dest = dest / "assets"
@@ -323,7 +344,10 @@ def _copy_exe(role: str, dest: Path) -> Path:
     for asset_name in ["alarm.wav", "alarm.ico", "alarm_server.ico", "alarm_client.ico"]:
         src_asset = _bundle_file(f"assets/{asset_name}")
         if src_asset:
-            shutil.copy2(src_asset, assets_dest / asset_name)
+            try:
+                shutil.copy2(src_asset, assets_dest / asset_name)
+            except PermissionError:
+                pass  # locked — already in place
 
     return target
 
@@ -658,13 +682,17 @@ class InstallerApp(tk.Tk):
 
         def _worker():
             try:
+                slug = _sanitize_name(room)
                 exe = _copy_exe("client", INSTALL_DIR)
-                cfg = INSTALL_DIR / "client_config.toml"
+                cfg = INSTALL_DIR / f"client_config_{slug}.toml"
                 write_client_config(cfg, room, sip, port, hotkey)
-                task_ok = register_task(TASK_CLIENT, exe, "client", cfg)
-                desk_ok, start_ok = create_shortcuts(exe, "client", cfg)
+                task_name = f"{TASK_CLIENT}_{slug}"
+                task_ok = register_task(task_name, exe, "client", cfg)
+                desk_ok, start_ok = create_shortcuts(
+                    exe, "client", cfg, room_name=room)
                 self.after(0, lambda: self._finish(task_ok, "client", exe,
-                                                    desk_ok, start_ok))
+                                                    desk_ok, start_ok,
+                                                    task_name=task_name))
             except Exception as exc:
                 self.after(0, lambda: self._error(str(exc)))
 
@@ -679,7 +707,8 @@ class InstallerApp(tk.Tk):
         bar.start(10)
 
     def _finish(self, task_ok: bool, role: str, exe: Path,
-                desk_ok: bool = False, start_ok: bool = False) -> None:
+                desk_ok: bool = False, start_ok: bool = False,
+                task_name: Optional[str] = None) -> None:
         self._clear()
 
         all_ok = task_ok and desk_ok and start_ok
@@ -706,7 +735,7 @@ class InstallerApp(tk.Tk):
                  font=("Arial", 11), bg=self._BG, fg=self._FG,
                  justify="center").pack(pady=15)
 
-        task = TASK_SERVER if role == "server" else TASK_CLIENT
+        task = task_name or (TASK_SERVER if role == "server" else TASK_CLIENT)
 
         btn_frm = tk.Frame(self, bg=self._BG)
         btn_frm.pack(pady=10)
