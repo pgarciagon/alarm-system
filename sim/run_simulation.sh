@@ -19,13 +19,17 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Find a Python with tkinter
 _find_python() {
     if [[ -n "${PYTHON:-}" ]]; then echo "$PYTHON"; return; fi
+    # Prefer 3.12+ — ships with Tcl/Tk 9 which works on macOS 26 (Tahoe).
+    # Python 3.9 has Tcl/Tk 8.6 which crashes on macOS 26.
     for c in \
-        /opt/homebrew/bin/python3.9 \
-        /opt/homebrew/bin/python3.11 \
+        /opt/homebrew/bin/python3.13 \
         /opt/homebrew/bin/python3.12 \
-        /opt/homebrew/bin/python3 \
-        /usr/local/bin/python3.11 \
+        /opt/homebrew/bin/python3.11 \
+        /usr/local/bin/python3.13 \
         /usr/local/bin/python3.12 \
+        /usr/local/bin/python3.11 \
+        /opt/homebrew/bin/python3.9 \
+        /opt/homebrew/bin/python3 \
         /usr/local/bin/python3 \
         python3
     do
