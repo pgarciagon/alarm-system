@@ -8,5 +8,9 @@ port                  = 9999
 # Seconds without a heartbeat before a client is considered down.
 heartbeat_timeout_sec = 15
 
+# Silent alarm mode: true = alarm is NOT shown on the triggering room's
+# own screen (default). false = all screens including the sender show it.
+silent_alarm          = true
+
 # Path for rotating log file.  Leave empty to log to stdout only.
 log_file              = ""

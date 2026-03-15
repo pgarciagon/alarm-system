@@ -112,6 +112,7 @@ def write_configs(num_rooms: int) -> None:
         host                  = "127.0.0.1"
         port                  = 9999
         heartbeat_timeout_sec = 15
+        silent_alarm          = true
         log_file              = ""
     """))
 

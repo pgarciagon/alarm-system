@@ -182,8 +182,13 @@ class AlarmServer:
                     await self._broadcast(ClientUpMsg(room=msg.room), exclude=None)
 
     async def _on_alarm(self, msg: AlarmMsg) -> None:
-        self.log.info("ALARM triggered from room %r — broadcasting to all clients", msg.room)
-        await self._broadcast(AlarmMsg(room=msg.room), exclude=None)
+        exclude = msg.room if self.cfg.silent_alarm else None
+        self.log.info(
+            "ALARM triggered from room %r — broadcasting to %s",
+            msg.room,
+            "all other clients" if exclude else "all clients (including sender)",
+        )
+        await self._broadcast(AlarmMsg(room=msg.room), exclude=exclude)
 
     async def _on_disconnect(self, room: str) -> None:
         async with self._lock:

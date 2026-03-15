@@ -34,6 +34,11 @@ class ServerConfig:
     port: int = 9999
     heartbeat_timeout_sec: int = 15
 
+    # When True (default), the alarm is NOT sent back to the room that
+    # triggered it — silent alarm mode.  Set to False to also alert the
+    # triggering room's own screen.
+    silent_alarm: bool = True
+
     # path to write log file; empty string → log to stdout only
     log_file: str = ""
 
@@ -58,10 +63,13 @@ class ClientConfig:
 
 _DEFAULT_SERVER_TOML = """\
 [server]
-host                 = "0.0.0.0"
-port                 = 9999
+host                  = "0.0.0.0"
+port                  = 9999
 heartbeat_timeout_sec = 15
-log_file             = ""
+# silent_alarm = true  → alarm is NOT shown on the triggering room's screen (default)
+# silent_alarm = false → alarm is shown on ALL screens including the sender
+silent_alarm          = true
+log_file              = ""
 """
 
 _DEFAULT_CLIENT_TOML = """\
