@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# build_executables.sh — Build standalone executables with PyInstaller
+# build_executables.sh — Build standalone Windows executables with PyInstaller
 #
-# Run from the repository root:
+# Run from the repository root on a Windows machine (Git Bash / MSYS2):
 #   ./scripts/build_executables.sh
 #
-# Outputs:
-#   dist/alarm_server    (or alarm_server.exe on Windows)
-#   dist/alarm_client    (or alarm_client.exe on Windows)
+# Or on macOS/Linux (cross-build not supported by PyInstaller — use a Windows
+# VM or CI runner for actual Windows .exe files):
+#   ./scripts/build_executables.sh
+#
+# Primary output (what to distribute):
+#   dist/alarm_installer.exe   ← single file for all 12 PCs
+#
+# Secondary outputs (standalone binaries, already bundled inside installer):
+#   dist/alarm_server.exe
+#   dist/alarm_client.exe
 #
 # Requirements:
-#   pip install pyinstaller
+#   pip install pyinstaller websockets keyboard pygame tomli
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -19,12 +26,20 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 echo "=== Building Alarm System executables ==="
+echo "    Repo: $REPO_ROOT"
+echo ""
 
-# Detect OS to set executable extension
+# Detect OS to set separator and extension
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
     EXT=".exe"
+    SEP=";"          # PyInstaller --add-data separator on Windows
+    NOCONSOLE="--noconsole"
+    UAC="--uac-admin"
 else
     EXT=""
+    SEP=":"          # Unix separator
+    NOCONSOLE=""
+    UAC=""
 fi
 
 # ---------------------------------------------------------------------------
@@ -34,46 +49,74 @@ COMMON_FLAGS=(
     --onefile
     --noconfirm
     --clean
-    # Bundle the alarm sound asset
-    --add-data "assets/alarm.wav:assets"
-    # Bundle default configs so the exe can generate them on first run
-    --add-data "config/server_config.toml:config"
-    --add-data "config/client_config.toml:config"
+    --paths "$REPO_ROOT"
+    --add-data "assets/alarm.wav${SEP}assets"
+    --add-data "config/server_config.toml${SEP}config"
+    --add-data "config/client_config.toml${SEP}config"
 )
-
-# Windows: run without a console window (no black popup)
-if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
-    COMMON_FLAGS+=(--noconsole)
-fi
 
 # ---------------------------------------------------------------------------
 # Build server
 # ---------------------------------------------------------------------------
-echo ""
-echo "--- Building server ---"
+echo "--- Building alarm_server ---"
 pyinstaller "${COMMON_FLAGS[@]}" \
+    ${NOCONSOLE} \
     --name "alarm_server" \
-    --paths "$REPO_ROOT" \
+    --hidden-import websockets \
+    --hidden-import websockets.server \
+    --hidden-import common.config \
+    --hidden-import common.protocol \
+    --hidden-import tomllib \
+    --hidden-import tomli \
     server/server.py
 
 # ---------------------------------------------------------------------------
 # Build client
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- Building client ---"
+echo "--- Building alarm_client ---"
 pyinstaller "${COMMON_FLAGS[@]}" \
+    ${NOCONSOLE} \
     --name "alarm_client" \
-    --paths "$REPO_ROOT" \
+    --hidden-import client.overlay \
+    --hidden-import client.sound \
+    --hidden-import client.hotkey \
+    --hidden-import common.config \
+    --hidden-import common.protocol \
+    --hidden-import websockets \
+    --hidden-import pygame \
+    --hidden-import pygame.mixer \
+    --hidden-import keyboard \
+    --hidden-import tkinter \
+    --hidden-import tkinter.ttk \
+    --hidden-import tomllib \
+    --hidden-import tomli \
     client/client.py
+
+# ---------------------------------------------------------------------------
+# Build installer (the main distributable — contains everything)
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Building alarm_installer (combined installer) ---"
+pyinstaller \
+    --noconfirm \
+    --clean \
+    ${UAC} \
+    scripts/alarm_installer.spec
 
 echo ""
 echo "=== Build complete ==="
-echo "Server: dist/alarm_server${EXT}"
-echo "Client: dist/alarm_client${EXT}"
 echo ""
-echo "Deployment checklist:"
-echo "  1. Copy dist/alarm_server${EXT} + config/server_config.toml to the server PC."
-echo "  2. Run: alarm_server${EXT} --install   (once, as admin)"
-echo "  3. For each room PC: copy dist/alarm_client${EXT} + config/client_config.toml"
-echo "     (edit room_name and server_ip in client_config.toml first)."
-echo "  4. Run: alarm_client${EXT} --install   (once, as admin)"
+echo "Primary distributable:"
+echo "  dist/alarm_installer${EXT}   ← copy this to every PC and run it"
+echo ""
+echo "Individual binaries (already bundled inside installer):"
+echo "  dist/alarm_server${EXT}"
+echo "  dist/alarm_client${EXT}"
+echo ""
+echo "Deployment:"
+echo "  1. Copy dist/alarm_installer${EXT} to a USB stick or shared folder."
+echo "  2. On the SERVER PC: run alarm_installer${EXT}, choose 'Server'."
+echo "  3. On each ROOM PC:  run alarm_installer${EXT}, choose 'Client'."
+echo "     → The installer auto-detects the server IP."
+echo "  4. Done — auto-start is configured via Task Scheduler."

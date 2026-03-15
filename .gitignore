@@ -6,13 +6,13 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-*.spec
+# *.spec — NOT ignored; alarm_installer.spec is hand-crafted and tracked
 .venv/
 venv/
 env/
 
-# PyInstaller
-*.spec
+# PyInstaller — auto-generated specs ignored, hand-crafted ones tracked
+# (alarm_installer.spec is explicitly committed)
 
 # Pytest
 .pytest_cache/
