@@ -247,8 +247,8 @@ class AlarmClient:
     def __init__(self, cfg: ClientConfig, fallback_hotkey: bool = False) -> None:
         self.cfg = cfg
         self.log = _setup_logging(cfg.log_file)
-        self._overlay = OverlayManager()
         self._sound = SoundPlayer(cfg.alarm_sound)
+        self._overlay = OverlayManager(stop_sound_cb=self._sound.stop)
         self._core = _AsyncCore(
             cfg=cfg,
             overlay=self._overlay,

@@ -71,13 +71,14 @@ class OverlayManager:
     POLL_MS  = 50
     FLASH_MS = 500
 
-    def __init__(self) -> None:
+    def __init__(self, stop_sound_cb=None) -> None:
         self._q: queue.Queue = queue.Queue()
         self._root: Optional[tk.Tk] = None
         self._alarm_win: Optional[tk.Toplevel] = None
         self._banner_wins: Dict[str, tk.Toplevel] = {}
         self._flash_bright = True
         self._flash_job: Optional[str] = None
+        self._stop_sound_cb = stop_sound_cb  # called when alarm is dismissed
 
     # ------------------------------------------------------------------
     # Thread-safe public API  (callable from any thread)
@@ -164,13 +165,20 @@ class OverlayManager:
         root = self._root
         assert root is not None
 
+        # Use root for screen dimensions — it's already mapped and reliable.
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+
         win = tk.Toplevel(root)
         win.title("ALARM")
-        win.attributes("-fullscreen", True)
+        # On macOS, -fullscreen True conflicts with overrideredirect; use
+        # explicit geometry to cover the full screen instead.
+        win.geometry(f"{sw}x{sh}+0+0")
         win.attributes("-topmost", True)
-        win.overrideredirect(True)
         win.configure(bg=_RED_BRIGHT)
         win.protocol("WM_DELETE_WINDOW", lambda: None)
+        win.lift()
+        win.focus_force()
 
         timestamp = datetime.now().strftime("%H:%M:%S")
 
@@ -180,7 +188,7 @@ class OverlayManager:
             font=("Arial", 72, "bold"),
             bg=_RED_BRIGHT,
             fg=_WHITE,
-            wraplength=win.winfo_screenwidth() - 100,
+            wraplength=sw - 100,
             justify="center",
         )
         room_lbl.pack(expand=True)
@@ -229,6 +237,11 @@ class OverlayManager:
             self._alarm_win.destroy()
             self._alarm_win = None
             log.info("Alarm overlay dismissed")
+            if self._stop_sound_cb:
+                try:
+                    self._stop_sound_cb()
+                except Exception:
+                    pass
 
     def _start_flash(self) -> None:
         if not self._alarm_win or not self._alarm_win.winfo_exists() or not self._root:
