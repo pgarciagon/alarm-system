@@ -31,9 +31,17 @@ The UI is in **German**.
 
 ---
 
-## Windows 11 Deployment (production)
+## Windows Deployment (production)
 
-### Option A — Fully automatic (recommended)
+### Option A — Download from GitHub Releases (recommended)
+
+1. Go to [**Releases**](https://github.com/pgarciagon/alarm-system/releases/latest)
+2. Download **`alarm_installer.exe`**
+3. On each PC: right-click the exe → **"Als Administrator ausführen"**
+
+That's it — no Python, no build tools, no command line needed.
+
+### Option B — One-command bootstrap
 
 Run **one command** on each PC. It downloads Python, all dependencies, builds and launches the GUI installer automatically.
 
@@ -46,20 +54,13 @@ irm https://raw.githubusercontent.com/pgarciagon/alarm-system/main/scripts/insta
 
 Or **right-click `install_windows.bat` → "Als Administrator ausführen"** — same result, no PowerShell knowledge needed.
 
-The script:
-1. Installs Python 3.12 via `winget` if not present
-2. Installs all Python packages (`websockets`, `keyboard`, `pygame`, `pyinstaller`)
-3. Downloads the repository from GitHub
-4. Builds `alarm_installer.exe` with PyInstaller (~1–2 min)
-5. Launches the GUI installer
-
-### Option B — Pre-built exe (USB stick)
+### Option C — Build from source
 
 Build `alarm_installer.exe` once on a Windows machine, then copy to every PC:
 
 ```powershell
 # In PowerShell or Git Bash, from the repo root:
-pip install pyinstaller websockets keyboard pygame
+pip install pyinstaller websockets keyboard pygame pystray Pillow
 bash scripts/build_executables.sh
 # → dist\alarm_installer.exe   ← copy this to USB
 ```
