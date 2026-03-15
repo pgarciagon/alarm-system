@@ -1,11 +1,12 @@
-# Alarm System
+# Alarmsystem
 
 A lightweight LAN-based emergency alert system for doctor practices.
 
 Any room PC can press a configurable hotkey (default **Alt+N**) to instantly trigger
-a full-screen red alarm overlay with an audible sound on **every other PC** in the
-practice. The central server also monitors client health and displays a warning
-banner when a room's alert system goes offline.
+a full-screen red alarm overlay with an audible sound on every other PC in the practice.
+The central server monitors client health and shows a warning banner when a room goes offline.
+
+The UI is in **German**.
 
 ---
 
@@ -16,29 +17,51 @@ banner when a room's alert system goes offline.
 │                   Local LAN (same subnet)            │
 │                                                      │
 │  ┌─────────┐   WebSocket/TCP   ┌──────────────────┐  │
-│  │ SERVER  │◄──────────────────│  CLIENT (Room 1) │  │
+│  │ SERVER  │◄──────────────────│  CLIENT (Zimmer 1)│  │
 │  │(always  │                   └──────────────────┘  │
 │  │  on)    │   WebSocket/TCP   ┌──────────────────┐  │
-│  │         │◄──────────────────│  CLIENT (Room 2) │  │
+│  │         │◄──────────────────│  CLIENT (Zimmer 2)│  │
 │  │         │        ...              ...           │  │
 │  └─────────┘                                        │
 └──────────────────────────────────────────────────────┘
 ```
 
-- **Server** – runs on the always-on PC; receives alarms and broadcasts them to all clients; tracks client health.
-- **Client** – runs on every room PC; registers the global hotkey; shows full-screen alarm; sends heartbeats.
+- **Server** – runs on the always-on PC; receives alarms and broadcasts them to all clients; tracks client health via heartbeats.
+- **Client** – runs on every room PC; registers the global hotkey; shows full-screen alarm overlay; sends heartbeats every 5 s.
 
 ---
 
-## Requirements
+## Windows 11 Deployment (production)
 
-- Python 3.9+ (3.11+ recommended; tkinter required for the client overlay)
-- Windows 11 in production; macOS for development/simulation
+### Quickstart — single installer for all 12 PCs
 
-```bash
-pip install -r requirements.txt
-# dev extras (tests + packaging):
-pip install -r requirements-dev.txt
+1. Build `alarm_installer.exe` on a Windows machine (see [Build](#build-on-windows)).
+2. Copy it to a USB stick.
+3. **Server PC** — run `alarm_installer.exe` → choose **SERVER** → install.
+4. **Each room PC** — run `alarm_installer.exe` → choose **CLIENT** → the installer auto-detects the server IP → set the room name → install.
+5. Done. Windows Task Scheduler handles auto-start at every boot and logon.
+
+The installer:
+- Requests UAC elevation automatically
+- Probes the LAN to detect a running server (client mode) or an existing server on localhost (server mode)
+- Writes `C:\Program Files\AlarmSystem\server_config.toml` or `client_config.toml`
+- Registers a Task Scheduler job with highest privileges, restart-on-failure, logon + boot triggers
+- Offers "Jetzt starten" / "Später starten" on completion
+
+### Build on Windows
+
+```powershell
+# In PowerShell or Git Bash, from the repo root:
+pip install pyinstaller websockets keyboard pygame
+bash scripts/build_executables.sh
+# → dist\alarm_installer.exe   ← distribute this
+```
+
+### Firewall
+
+Open an inbound rule for **TCP port 9999** on the server PC:
+```powershell
+netsh advfirewall firewall add rule name="AlarmSystem" dir=in action=allow protocol=TCP localport=9999
 ```
 
 ---
@@ -52,6 +75,9 @@ pip install -r requirements-dev.txt
 host                  = "0.0.0.0"   # bind to all interfaces
 port                  = 9999
 heartbeat_timeout_sec = 15          # mark client down after this many seconds
+# silent_alarm = true  → alarm NOT shown on the triggering room's screen (default)
+# silent_alarm = false → alarm shown on ALL screens including the sender
+silent_alarm          = true
 log_file              = ""          # empty = stdout only
 ```
 
@@ -59,7 +85,7 @@ log_file              = ""          # empty = stdout only
 
 ```toml
 [client]
-room_name   = "Room 1"          # displayed in alarm messages
+room_name   = "Zimmer 1"        # displayed in alarm messages
 server_ip   = "192.168.1.100"   # IP of the server PC
 server_port = 9999
 hotkey      = "alt+n"           # any combo supported by the keyboard library
@@ -67,39 +93,46 @@ alarm_sound = ""                # empty = use bundled alarm.wav
 log_file    = ""
 ```
 
-If no config file is found at startup, a default one is written to the current
-working directory so you can edit it.
+If no config file is found at startup a default is written to the working directory.
 
 ---
 
-## Running (development / macOS)
+## macOS Simulation (development)
 
-### Start the server
-
-```bash
-python -m server.server --config config/server_config.toml
-```
-
-### Start a client
+### Requirements
 
 ```bash
-# Uses the global hotkey (requires Accessibility permission on macOS)
-python -m client.client --config config/client_config.toml
+# Python 3.12+ with Tcl/Tk 9.0 is required on macOS 26 (Tahoe).
+# Tcl/Tk 8.6 (Python 3.9) crashes with "Tcl_WaitForEvent: Notifier not initialized".
+brew install python@3.12 python-tk@3.12
 
-# Fallback mode: type 'a' + Enter in the terminal to trigger an alarm
-python -m client.client --config config/client_config.toml --fallback-hotkey
+pip install -r requirements.txt
 ```
 
-### Multi-room simulation (macOS — opens Terminal windows)
+### Multi-room simulation (opens Terminal windows)
 
 ```bash
-./sim/run_simulation.sh 5   # simulate 5 rooms
+./sim/run_simulation.sh 3   # simulate 3 rooms
+# In any client window: type  a  + Enter  to trigger an alarm
 ```
 
-### Headless simulation (no GUI — good for CI)
+### Headless simulation (no GUI — CI friendly)
 
 ```bash
 python sim/simulate.py --rooms 5 --alarm-from "Room 3" --duration 15
+```
+
+### Manual start
+
+```bash
+# Server
+python -m server.server --config config/server_config.toml
+
+# Client (global hotkey — requires Accessibility permission on macOS)
+python -m client.client --config config/client_config.toml
+
+# Client (fallback: type 'a' + Enter in terminal)
+python -m client.client --config config/client_config.toml --fallback-hotkey
 ```
 
 ---
@@ -110,59 +143,18 @@ python sim/simulate.py --rooms 5 --alarm-from "Room 3" --duration 15
 pytest tests/ -v
 ```
 
-All 24 tests cover:
-- Protocol encode/decode (all message types, error cases, round-trips)
-- Server alarm broadcast to all clients
-- `client_down` broadcast on disconnect
-- `client_up` broadcast on reconnect
-- Config defaults
+24 tests cover protocol encode/decode, alarm broadcast, `client_down`/`client_up` events, heartbeat timeout, config defaults.
 
 ---
 
-## Windows 11 Deployment
+## Alarm overlay
 
-### 1. Build executables
-
-```bat
-REM On Windows (or cross-compile via PyInstaller):
-pip install pyinstaller
-bash scripts/build_executables.sh
-```
-
-This produces:
-- `dist/alarm_server.exe`
-- `dist/alarm_client.exe`
-
-### 2. Deploy the server
-
-Copy to the always-on server PC:
-```
-alarm_server.exe
-server_config.toml   ← edit host/port if needed
-```
-
-Run once as Administrator to register auto-start:
-```bat
-alarm_server.exe --install
-```
-
-Open Windows Firewall inbound rule for TCP port 9999.
-
-### 3. Deploy each client
-
-Copy to each room PC:
-```
-alarm_client.exe
-client_config.toml   ← set room_name and server_ip for this room
-```
-
-Run once as Administrator to register auto-start:
-```bat
-alarm_client.exe --install
-```
-
-> **Note:** The Task Scheduler job runs with "highest privileges" so the
-> hotkey works even when elevated applications have focus.
+- Full-screen red background (`#CC0000`) flashing with dark red every 500 ms
+- Large white text: `⚠ ALARM — ZIMMER X ⚠`
+- Timestamp `Ausgelöst um HH:MM:SS`
+- **BESTÄTIGEN (ESC)** button — dismisses the overlay and stops the sound
+- Amber corner banner `Alarmsystem NICHT VERFÜGBAR in Zimmer X` when a room goes offline (auto-dismisses after 8 s)
+- Green corner banner `Alarmsystem WIEDERHERGESTELLT in Zimmer X` when a room reconnects (auto-dismisses after 5 s)
 
 ---
 
@@ -170,44 +162,47 @@ alarm_client.exe --install
 
 ```
 alarm-system/
-├── PLAN.md                         Project plan & architecture
 ├── README.md
+├── PLAN.md                         Project plan & architecture notes
 ├── pyproject.toml
 ├── requirements.txt
 ├── requirements-dev.txt
 │
 ├── common/
 │   ├── protocol.py                 Message types + JSON encode/decode
-│   └── config.py                  TOML config loading + defaults
+│   └── config.py                   TOML config loading + defaults
 │
 ├── server/
-│   └── server.py                  WebSocket hub + health monitor
+│   └── server.py                   WebSocket hub + health monitor
 │
 ├── client/
-│   ├── client.py                  Main client loop (WebSocket + hotkey)
-│   ├── hotkey.py                  Global hotkey registration
-│   ├── overlay.py                 Full-screen tkinter alarm overlay
-│   └── sound.py                   pygame-based looped sound playback
+│   ├── client.py                   Main client (asyncio bg thread + tkinter main thread)
+│   ├── hotkey.py                   Global hotkey + terminal fallback
+│   ├── overlay.py                  Full-screen tkinter alarm overlay (German UI)
+│   └── sound.py                    pygame-based looped sound playback
 │
 ├── assets/
-│   └── alarm.wav                  Bundled alarm sound (two-tone beep)
+│   └── alarm.wav                   Bundled two-tone alarm sound
 │
 ├── config/
-│   ├── server_config.toml         Default server config
-│   └── client_config.toml         Default client config (edit per room)
+│   ├── server_config.toml          Default server config
+│   └── client_config.toml          Default client config (edit per room)
 │
 ├── scripts/
-│   ├── install_autostart_windows.py   Windows Task Scheduler registration
-│   ├── install_autostart_mac.py       macOS launchd plist registration
-│   └── build_executables.sh           PyInstaller build script
+│   ├── installer.py                Windows GUI installer (server/client chooser)
+│   ├── alarm_installer.spec        PyInstaller spec → alarm_installer.exe
+│   ├── build_executables.sh        Build script (server + client + installer)
+│   ├── install_autostart_windows.py  Direct Task Scheduler registration
+│   └── install_autostart_mac.py    macOS launchd plist registration
 │
 ├── sim/
-│   ├── run_simulation.sh          Multi-window macOS simulation script
-│   └── simulate.py                Headless asyncio simulation
+│   ├── run_simulation.sh           macOS multi-window simulation launcher
+│   ├── launch.py                   Python launcher (opens Terminal.app windows)
+│   └── simulate.py                 Headless asyncio simulation (CI)
 │
 └── tests/
-    ├── test_protocol.py           17 protocol unit tests
-    └── test_server.py             7 server integration tests
+    ├── test_protocol.py            17 protocol unit tests
+    └── test_server.py              7 server integration tests
 ```
 
 ---
@@ -216,15 +211,16 @@ alarm-system/
 
 | Platform | Requirement |
 |----------|-------------|
-| Windows  | Run as Administrator (or Task Scheduler "highest privileges") for global capture across all apps |
+| Windows  | Run as Administrator (Task Scheduler "highest privileges") for global capture across all apps |
 | macOS    | Grant Accessibility permission once: System Settings → Privacy & Security → Accessibility |
 
 ---
 
-## Alarm overlay
+## macOS Tcl/Tk compatibility
 
-- Full-screen red background (`#CC0000`) flashing with dark red every 500 ms
-- Large white text: `⚠ ALARM — ROOM X ⚠`
-- Timestamp of when the alarm was triggered
-- **Dismiss** button or press **ESC**
-- Amber corner banner for `client_down` warnings; auto-dismissed green banner for `client_up`
+| Python | Tcl/Tk | macOS 26 (Tahoe) |
+|--------|--------|-----------------|
+| 3.9 (Homebrew) | 8.6 | ❌ Crashes — `Tcl_WaitForEvent: Notifier not initialized` |
+| 3.12+ (Homebrew) | 9.0 | ✅ Works |
+
+Always use `brew install python@3.12 python-tk@3.12` on macOS 26+.
