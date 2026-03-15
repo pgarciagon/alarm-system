@@ -21,8 +21,38 @@ set -euo pipefail
 
 NUM_CLIENTS="${1:-3}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON="${PYTHON:-python3}"
 SIM_DIR="/tmp/alarm-sim"
+
+# ---------------------------------------------------------------------------
+# Resolve a Python interpreter that has tkinter.
+# Prefer an explicit $PYTHON env var, then search common locations.
+# ---------------------------------------------------------------------------
+_find_python() {
+    # Explicit override always wins
+    if [[ -n "${PYTHON:-}" ]]; then
+        echo "$PYTHON"; return
+    fi
+    # Homebrew arm64 / Apple-silicon path (python-tk installs here)
+    for candidate in \
+        /opt/homebrew/bin/python3.9 \
+        /opt/homebrew/bin/python3.11 \
+        /opt/homebrew/bin/python3.12 \
+        /opt/homebrew/bin/python3 \
+        /usr/local/bin/python3.11 \
+        /usr/local/bin/python3.12 \
+        /usr/local/bin/python3 \
+        python3
+    do
+        if command -v "$candidate" &>/dev/null; then
+            if "$candidate" -c "import tkinter" 2>/dev/null; then
+                echo "$candidate"; return
+            fi
+        fi
+    done
+    echo "python3"   # last resort — will fail with a clear error at runtime
+}
+PYTHON="$(_find_python)"
+echo "Using Python: $PYTHON ($($PYTHON --version 2>&1))"
 
 mkdir -p "$SIM_DIR"
 
