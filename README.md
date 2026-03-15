@@ -33,29 +33,51 @@ The UI is in **German**.
 
 ## Windows 11 Deployment (production)
 
-### Quickstart — single installer for all 12 PCs
+### Option A — Fully automatic (recommended)
 
-1. Build `alarm_installer.exe` on a Windows machine (see [Build](#build-on-windows)).
-2. Copy it to a USB stick.
-3. **Server PC** — run `alarm_installer.exe` → choose **SERVER** → install.
-4. **Each room PC** — run `alarm_installer.exe` → choose **CLIENT** → the installer auto-detects the server IP → set the room name → install.
-5. Done. Windows Task Scheduler handles auto-start at every boot and logon.
+Run **one command** on each PC. It downloads Python, all dependencies, builds and launches the GUI installer automatically.
 
-The installer:
-- Requests UAC elevation automatically
-- Probes the LAN to detect a running server (client mode) or an existing server on localhost (server mode)
-- Writes `C:\Program Files\AlarmSystem\server_config.toml` or `client_config.toml`
-- Registers a Task Scheduler job with highest privileges, restart-on-failure, logon + boot triggers
-- Offers "Jetzt starten" / "Später starten" on completion
+**Right-click PowerShell → "Als Administrator ausführen"**, then paste:
 
-### Build on Windows
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force
+irm https://raw.githubusercontent.com/pgarciagon/alarm-system/main/scripts/install_windows.ps1 | iex
+```
+
+Or **right-click `install_windows.bat` → "Als Administrator ausführen"** — same result, no PowerShell knowledge needed.
+
+The script:
+1. Installs Python 3.12 via `winget` if not present
+2. Installs all Python packages (`websockets`, `keyboard`, `pygame`, `pyinstaller`)
+3. Downloads the repository from GitHub
+4. Builds `alarm_installer.exe` with PyInstaller (~1–2 min)
+5. Launches the GUI installer
+
+### Option B — Pre-built exe (USB stick)
+
+Build `alarm_installer.exe` once on a Windows machine, then copy to every PC:
 
 ```powershell
 # In PowerShell or Git Bash, from the repo root:
 pip install pyinstaller websockets keyboard pygame
 bash scripts/build_executables.sh
-# → dist\alarm_installer.exe   ← distribute this
+# → dist\alarm_installer.exe   ← copy this to USB
 ```
+
+Run on each PC: right-click → "Als Administrator ausführen".
+
+### GUI installer workflow
+
+1. **Server PC** → choose **SERVER** → install
+2. **Each room PC** → choose **CLIENT** → installer auto-detects server IP → set room name → install
+3. Done — Task Scheduler handles auto-start at every boot and logon
+
+The installer:
+- Requests UAC elevation automatically
+- Probes the LAN to detect a running server or existing installation
+- Writes `C:\Program Files\AlarmSystem\server_config.toml` or `client_config.toml`
+- Registers a Task Scheduler job with highest privileges, restart-on-failure, logon + boot triggers
+- Offers "Jetzt starten" / "Später starten" on completion
 
 ### Firewall
 
@@ -189,6 +211,8 @@ alarm-system/
 │   └── client_config.toml          Default client config (edit per room)
 │
 ├── scripts/
+│   ├── install_windows.bat         Double-click installer (runs PowerShell script)
+│   ├── install_windows.ps1         One-command bootstrap: Python + deps + build + GUI
 │   ├── installer.py                Windows GUI installer (server/client chooser)
 │   ├── alarm_installer.spec        PyInstaller spec → alarm_installer.exe
 │   ├── build_executables.sh        Build script (server + client + installer)
