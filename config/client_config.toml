@@ -1,0 +1,20 @@
+[client]
+# Display name for this room.  Shown in alarm messages on all screens.
+room_name   = "Room 1"
+
+# IP address (or hostname) of the always-on server PC.
+# Change this to the actual server IP before deploying.
+server_ip   = "192.168.1.100"
+
+# Must match the port in server_config.toml.
+server_port = 9999
+
+# Key combination that triggers the alarm.
+# Uses the keyboard library syntax: "alt+n", "ctrl+shift+a", etc.
+hotkey      = "alt+n"
+
+# Path to a custom alarm .wav file.  Leave empty to use the bundled sound.
+alarm_sound = ""
+
+# Path for rotating log file.  Leave empty to log to stdout only.
+log_file    = ""

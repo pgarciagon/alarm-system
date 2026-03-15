@@ -1,0 +1,12 @@
+[server]
+# IP/interface to listen on. "0.0.0.0" = all network interfaces.
+host                  = "0.0.0.0"
+
+# TCP port for WebSocket connections.
+port                  = 9999
+
+# Seconds without a heartbeat before a client is considered down.
+heartbeat_timeout_sec = 15
+
+# Path for rotating log file.  Leave empty to log to stdout only.
+log_file              = ""

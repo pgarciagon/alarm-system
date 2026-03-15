@@ -1,0 +1,5 @@
+websockets>=12.0
+keyboard>=0.13.5
+pygame>=2.5.0
+# tomllib is stdlib in Python 3.11+; only needed for older versions:
+tomli>=2.0.1; python_version < "3.11"

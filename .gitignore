@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.spec
+.venv/
+venv/
+env/
+
+# PyInstaller
+*.spec
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+*.err
+
+# Runtime-generated configs (don't commit auto-generated copies)
+/server_config.toml
+/client_config.toml
+/tmp/
