@@ -118,15 +118,26 @@ class _FallbackHotkeyListener:
         self._running = False
 
     def _loop(self) -> None:
-        import sys as _sys
-
+        # IMPORTANT: Do NOT use input() here.
+        # When tkinter is active, Python replaces PyOS_ReadlineFunctionPointer
+        # with EventHook() which calls Tcl_DoOneEvent — calling Tcl from a
+        # background thread triggers Tcl_Panic / SIGTRAP on macOS.
+        # Reading directly from the raw fd bypasses that hook entirely.
+        import io
+        raw = io.open(sys.stdin.fileno(), mode="rb", closefd=False, buffering=0)
+        buf = b""
         while self._running:
             try:
-                line = input()
-                if self._trigger in line.lower():
-                    self._callback()
-            except EOFError:
-                break
+                ch = raw.read(1)
+                if not ch:
+                    break
+                if ch == b"\n":
+                    line = buf.decode(errors="replace")
+                    buf = b""
+                    if self._trigger in line.lower():
+                        self._callback()
+                else:
+                    buf += ch
             except Exception:  # noqa: BLE001
                 break
 
