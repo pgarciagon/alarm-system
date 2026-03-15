@@ -165,6 +165,7 @@ class _AsyncCore:
                 ) as ws:
                     attempt = 0
                     self.log.info("Connected to server")
+                    self._overlay.set_connected(True)
                     await ws.send(encode(RegisterMsg(room=self.cfg.room_name)))
                     await asyncio.gather(
                         self._receive_loop(ws),
@@ -174,6 +175,7 @@ class _AsyncCore:
 
             except (ConnectionClosed, WebSocketException, OSError) as exc:
                 self.log.warning("Connection lost: %s", exc)
+                self._overlay.set_connected(False)
             except asyncio.CancelledError:
                 break
             finally:
@@ -258,6 +260,7 @@ class AlarmClient:
             room_name=cfg.room_name,
             server_info=f"{cfg.server_ip}:{cfg.server_port}",
             stop_client_cb=self.stop,
+            hotkey=cfg.hotkey,
         )
         self._core = _AsyncCore(
             cfg=cfg,

@@ -59,6 +59,10 @@ class _Stop:
 class _UpdateClientList:
     clients: list  # [{"room": str, "is_down": bool}, ...]
 
+@dataclass
+class _SetConnected:
+    connected: bool
+
 
 # ---------------------------------------------------------------------------
 # Overlay manager  (main-thread only)
@@ -79,7 +83,7 @@ class OverlayManager:
 
     def __init__(self, stop_sound_cb=None, show_gui: bool = True,
                  room_name: str = "", server_info: str = "",
-                 stop_client_cb=None) -> None:
+                 stop_client_cb=None, hotkey: str = "") -> None:
         self._q: queue.Queue = queue.Queue()
         self._root: Optional[tk.Tk] = None
         self._alarm_win: Optional[tk.Toplevel] = None
@@ -91,9 +95,11 @@ class OverlayManager:
         self._show_gui = show_gui
         self._room_name = room_name
         self._server_info = server_info
+        self._hotkey = hotkey
         self._tray: Optional[TrayIcon] = None
         self._status_win: Optional[tk.Toplevel] = None
         self._status_frame: Optional[tk.Frame] = None
+        self._connected = False
 
     # ------------------------------------------------------------------
     # Thread-safe public API  (callable from any thread)
@@ -110,6 +116,9 @@ class OverlayManager:
 
     def update_client_list(self, clients: list) -> None:
         self._q.put(_UpdateClientList(clients=clients))
+
+    def set_connected(self, connected: bool) -> None:
+        self._q.put(_SetConnected(connected=connected))
 
     def stop(self) -> None:
         self._q.put(_Stop())
@@ -146,6 +155,10 @@ class OverlayManager:
         )
         self._tray.start()
 
+        # Show status window immediately (with "waiting for server" state)
+        if self._show_gui:
+            self._root.after(200, self._show_initial_status)
+
         self._root.after(self.POLL_MS, self._poll)
         self._root.mainloop()
 
@@ -178,7 +191,11 @@ class OverlayManager:
         elif isinstance(cmd, _ShowBanner):
             self._show_banner(cmd.room, cmd.up)
         elif isinstance(cmd, _UpdateClientList):
+            self._connected = True
             self._update_client_list(cmd.clients)
+        elif isinstance(cmd, _SetConnected):
+            self._connected = cmd.connected
+            self._refresh_connection_status()
         elif isinstance(cmd, _Stop):
             if self._tray:
                 self._tray.stop()
@@ -375,6 +392,12 @@ class OverlayManager:
     _ST_GREEN = "#00b894"
     _ST_RED = "#e94560"
 
+    def _show_initial_status(self) -> None:
+        """Show the status window immediately on startup."""
+        if self._status_win is None or not self._status_win.winfo_exists():
+            self._build_status_window()
+        self._refresh_connection_status()
+
     def _update_client_list(self, clients: list) -> None:
         if not self._show_gui:
             return
@@ -390,17 +413,17 @@ class OverlayManager:
         win.title("Alarmsystem \u2014 Status")
         set_window_icon(win, "alarm_client.ico")
         win.configure(bg=self._ST_BG)
-        win.geometry("350x300")
+        win.geometry("350x340")
         win.resizable(True, True)
         # Hide from taskbar — only show in system tray
         win.attributes("-toolwindow", True)
-        win.protocol("WM_DELETE_WINDOW", self._exit_from_tray)
+        win.protocol("WM_DELETE_WINDOW", self._minimize_status)
 
         # Header
         header = tk.Frame(win, bg=self._ST_HEADER_BG, pady=8)
         header.pack(fill="x")
 
-        # Title row with shutdown button
+        # Title row with buttons
         title_row = tk.Frame(header, bg=self._ST_HEADER_BG)
         title_row.pack(fill="x", padx=10)
 
@@ -413,13 +436,36 @@ class OverlayManager:
             title_row, text="Beenden", font=("Arial", 9),
             bg=self._ST_RED, fg="white", relief="flat", padx=10, pady=2,
             cursor="hand2", command=self._exit_from_tray,
+        ).pack(side="right", padx=(4, 0))
+
+        tk.Button(
+            title_row, text="Ausblenden", font=("Arial", 9),
+            bg="#0f3460", fg=self._ST_FG, relief="flat", padx=10, pady=2,
+            cursor="hand2", command=self._minimize_status,
         ).pack(side="right")
+
+        # Info row: server + hotkey
+        info_row = tk.Frame(header, bg=self._ST_HEADER_BG)
+        info_row.pack(fill="x", padx=10, pady=(4, 0))
 
         if self._server_info:
             tk.Label(
-                header, text=f"Server: {self._server_info}",
+                info_row, text=f"Server: {self._server_info}",
                 font=("Arial", 9), bg=self._ST_HEADER_BG, fg="#888888",
-            ).pack(anchor="w", padx=10)
+            ).pack(side="left")
+
+        if self._hotkey:
+            tk.Label(
+                info_row, text=f"Tastenkürzel: {self._hotkey.upper()}",
+                font=("Arial", 9, "bold"), bg=self._ST_HEADER_BG, fg="#fdcb6e",
+            ).pack(side="right")
+
+        # Connection status label
+        self._conn_label = tk.Label(
+            win, text="", font=("Arial", 10), bg=self._ST_BG, fg="#888888",
+            anchor="w", padx=10, pady=4,
+        )
+        self._conn_label.pack(fill="x")
 
         # Separator
         tk.Frame(win, bg="#333333", height=1).pack(fill="x")
@@ -439,6 +485,24 @@ class OverlayManager:
         self._status_footer.pack(fill="x", side="bottom")
 
         self._status_win = win
+
+    def _refresh_connection_status(self) -> None:
+        """Update the connection status label in the status window."""
+        if not hasattr(self, '_conn_label') or self._conn_label is None:
+            return
+        if self._connected:
+            self._conn_label.config(
+                text="\u25cf Verbunden", fg=self._ST_GREEN,
+            )
+        else:
+            self._conn_label.config(
+                text="\u25cf Warte auf Server\u2026", fg="#fdcb6e",
+            )
+
+    def _minimize_status(self) -> None:
+        """Hide the status window (keep running in tray)."""
+        if self._status_win and self._status_win.winfo_exists():
+            self._status_win.withdraw()
 
     def _update_status_content(self, clients: list) -> None:
         frame = self._status_frame
@@ -497,8 +561,10 @@ class OverlayManager:
 
     def _restore_from_tray(self) -> None:
         """Restore the status window from tray. Called from pystray thread."""
-        if self._root and self._status_win:
+        if self._root and self._status_win and self._status_win.winfo_exists():
             self._root.after(0, self._status_win.deiconify)
+        elif self._root and self._show_gui:
+            self._root.after(0, self._show_initial_status)
 
     def _exit_from_tray(self) -> None:
         """Full shutdown from tray exit menu. Called from pystray thread."""

@@ -105,6 +105,12 @@ class ServerDashboard:
             title_row, text="Beenden", font=("Arial", 9),
             bg=_RED, fg="white", relief="flat", padx=10, pady=2,
             cursor="hand2", command=self._exit,
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+
+        tk.Button(
+            title_row, text="Ausblenden", font=("Arial", 9),
+            bg=_BLUE, fg=_FG, relief="flat", padx=10, pady=2,
+            cursor="hand2", command=self._minimize_to_tray,
         ).pack(side=tk.RIGHT)
 
         info_frame = tk.Frame(frame, bg=_HEADER_BG)
