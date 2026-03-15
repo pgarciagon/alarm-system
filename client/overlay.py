@@ -106,7 +106,14 @@ class OverlayManager:
         Must be called from the main thread.
         """
         self._root = tk.Tk()
-        self._root.withdraw()          # invisible root window
+        # On macOS 26+ (Tahoe) withdraw() before mainloop() triggers
+        # 'Tcl_WaitForEvent: Notifier not initialized' because the
+        # NSRunLoop hasn't started yet. Instead we move the window
+        # far off-screen and make it transparent/tiny, then hide it
+        # properly once the loop is running.
+        self._root.geometry("1x1+-10000+-10000")
+        self._root.attributes("-alpha", 0.0)
+        self._root.after(100, self._root.withdraw)  # safe to withdraw after loop starts
         self._root.after(self.POLL_MS, self._poll)
         self._root.mainloop()
 
