@@ -21,6 +21,7 @@ MSG_HEARTBEAT   = "heartbeat"
 MSG_DISMISS     = "dismiss"
 MSG_CLIENT_DOWN = "client_down"
 MSG_CLIENT_UP   = "client_up"
+MSG_CLIENT_LIST = "client_list"
 
 
 # ---------------------------------------------------------------------------
@@ -63,11 +64,17 @@ class ClientUpMsg:
     type: str = MSG_CLIENT_UP
 
 
+@dataclass
+class ClientListMsg:
+    clients: list  # [{"room": str, "is_down": bool}, ...]
+    type: str = MSG_CLIENT_LIST
+
+
 # ---------------------------------------------------------------------------
 # Serialisation helpers
 # ---------------------------------------------------------------------------
 
-AnyMsg = Union[RegisterMsg, AlarmMsg, HeartbeatMsg, DismissMsg, ClientDownMsg, ClientUpMsg]
+AnyMsg = Union[RegisterMsg, AlarmMsg, HeartbeatMsg, DismissMsg, ClientDownMsg, ClientUpMsg, ClientListMsg]
 
 _TYPE_MAP: Dict[str, type] = {
     MSG_REGISTER:    RegisterMsg,
@@ -76,6 +83,7 @@ _TYPE_MAP: Dict[str, type] = {
     MSG_DISMISS:     DismissMsg,
     MSG_CLIENT_DOWN: ClientDownMsg,
     MSG_CLIENT_UP:   ClientUpMsg,
+    MSG_CLIENT_LIST: ClientListMsg,
 }
 
 

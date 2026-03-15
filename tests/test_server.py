@@ -39,7 +39,7 @@ TEST_PORT = 19998   # Use a dedicated port to avoid clashing
 
 
 def make_config(**overrides) -> ServerConfig:
-    defaults = dict(host="127.0.0.1", port=TEST_PORT, heartbeat_timeout_sec=2)
+    defaults = dict(host="127.0.0.1", port=TEST_PORT, heartbeat_timeout_sec=2, silent_alarm=False)
     defaults.update(overrides)
     return ServerConfig(**defaults)
 
@@ -161,10 +161,15 @@ class TestAlarmBroadcast:
         await trigger.connect()
         await asyncio.sleep(0.1)
 
+        # Drain client_list messages from registration
+        await b.drain(timeout=0.2)
+
         await trigger.send_alarm()
-        msg = await b.recv_one(timeout=3)
-        assert msg["type"] == MSG_ALARM
-        assert msg["room"] == "Room Trigger"
+        await asyncio.sleep(0.2)
+        msgs = await b.drain(timeout=1.0)
+        alarm_msgs = [m for m in msgs if m.get("type") == MSG_ALARM]
+        assert len(alarm_msgs) == 1
+        assert alarm_msgs[0]["room"] == "Room Trigger"
 
         await b.close()
         await trigger.close()

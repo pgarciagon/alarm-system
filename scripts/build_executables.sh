@@ -51,6 +51,9 @@ COMMON_FLAGS=(
     --clean
     --paths "$REPO_ROOT"
     --add-data "assets/alarm.wav${SEP}assets"
+    --add-data "assets/alarm.ico${SEP}assets"
+    --add-data "assets/alarm_server.ico${SEP}assets"
+    --add-data "assets/alarm_client.ico${SEP}assets"
     --add-data "config/server_config.toml${SEP}config"
     --add-data "config/client_config.toml${SEP}config"
 )
@@ -62,10 +65,16 @@ echo "--- Building alarm_server ---"
 pyinstaller "${COMMON_FLAGS[@]}" \
     ${NOCONSOLE} \
     --name "alarm_server" \
+    --icon "assets/alarm_server.ico" \
     --hidden-import websockets \
     --hidden-import websockets.server \
     --hidden-import common.config \
     --hidden-import common.protocol \
+    --hidden-import common.tray_icon \
+    --hidden-import server.dashboard \
+    --hidden-import server.tray_icon \
+    --hidden-import pystray \
+    --hidden-import PIL \
     --hidden-import tomllib \
     --hidden-import tomli \
     server/server.py
@@ -78,11 +87,15 @@ echo "--- Building alarm_client ---"
 pyinstaller "${COMMON_FLAGS[@]}" \
     ${NOCONSOLE} \
     --name "alarm_client" \
+    --icon "assets/alarm_client.ico" \
     --hidden-import client.overlay \
     --hidden-import client.sound \
     --hidden-import client.hotkey \
     --hidden-import common.config \
     --hidden-import common.protocol \
+    --hidden-import common.tray_icon \
+    --hidden-import pystray \
+    --hidden-import PIL \
     --hidden-import websockets \
     --hidden-import pygame \
     --hidden-import pygame.mixer \

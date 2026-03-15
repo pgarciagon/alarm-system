@@ -93,7 +93,10 @@ class SoundPlayer:
                 # Tell SDL not to touch the video display or the main run loop.
                 # These must be set BEFORE pygame.mixer.init().
                 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-                os.environ.setdefault("SDL_AUDIODRIVER", "coreaudio")
+                # On macOS, force coreaudio to avoid NSRunLoop conflicts.
+                # On Windows, let SDL auto-detect (directsound/wasapi).
+                if sys.platform == "darwin":
+                    os.environ.setdefault("SDL_AUDIODRIVER", "coreaudio")
 
                 # Suppress pygame's startup banner
                 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")

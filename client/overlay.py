@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Optional
 
+from common.tray_icon import TrayIcon, set_window_icon
+
 log = logging.getLogger("alarm.client.overlay")
 
 # ---------------------------------------------------------------------------
@@ -53,6 +55,10 @@ class _ShowBanner:
 class _Stop:
     pass
 
+@dataclass
+class _UpdateClientList:
+    clients: list  # [{"room": str, "is_down": bool}, ...]
+
 
 # ---------------------------------------------------------------------------
 # Overlay manager  (main-thread only)
@@ -71,7 +77,9 @@ class OverlayManager:
     POLL_MS  = 50
     FLASH_MS = 500
 
-    def __init__(self, stop_sound_cb=None) -> None:
+    def __init__(self, stop_sound_cb=None, show_gui: bool = True,
+                 room_name: str = "", server_info: str = "",
+                 stop_client_cb=None) -> None:
         self._q: queue.Queue = queue.Queue()
         self._root: Optional[tk.Tk] = None
         self._alarm_win: Optional[tk.Toplevel] = None
@@ -79,6 +87,13 @@ class OverlayManager:
         self._flash_bright = True
         self._flash_job: Optional[str] = None
         self._stop_sound_cb = stop_sound_cb  # called when alarm is dismissed
+        self._stop_client_cb = stop_client_cb  # called on tray "Beenden"
+        self._show_gui = show_gui
+        self._room_name = room_name
+        self._server_info = server_info
+        self._tray: Optional[TrayIcon] = None
+        self._status_win: Optional[tk.Toplevel] = None
+        self._status_frame: Optional[tk.Frame] = None
 
     # ------------------------------------------------------------------
     # Thread-safe public API  (callable from any thread)
@@ -92,6 +107,9 @@ class OverlayManager:
 
     def show_banner(self, room: str, up: bool) -> None:
         self._q.put(_ShowBanner(room=room, up=up))
+
+    def update_client_list(self, clients: list) -> None:
+        self._q.put(_UpdateClientList(clients=clients))
 
     def stop(self) -> None:
         self._q.put(_Stop())
@@ -115,8 +133,26 @@ class OverlayManager:
         self._root.geometry("1x1+-10000+-10000")
         self._root.attributes("-alpha", 0.0)
         self._root.after(100, self._root.withdraw)  # safe to withdraw after loop starts
+
+        # System tray icon
+        self._tray = TrayIcon(
+            on_show=self._restore_from_tray,
+            on_exit=self._exit_from_tray,
+            name="alarm_client",
+            title=f"Alarm Client — {self._room_name}",
+            show_label="Status anzeigen",
+            icon_color="#00b894",
+            icon_file="alarm_client.ico",
+        )
+        self._tray.start()
+
         self._root.after(self.POLL_MS, self._poll)
         self._root.mainloop()
+
+        # Clean up tray on exit
+        if self._tray:
+            self._tray.stop()
+            self._tray = None
 
     # ------------------------------------------------------------------
     # Internal poll (main thread only)
@@ -141,7 +177,12 @@ class OverlayManager:
             self._hide_alarm()
         elif isinstance(cmd, _ShowBanner):
             self._show_banner(cmd.room, cmd.up)
+        elif isinstance(cmd, _UpdateClientList):
+            self._update_client_list(cmd.clients)
         elif isinstance(cmd, _Stop):
+            if self._tray:
+                self._tray.stop()
+                self._tray = None
             if self._root:
                 self._root.quit()
 
@@ -323,3 +364,133 @@ class OverlayManager:
                 win.destroy()
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Client status window
+    # ------------------------------------------------------------------
+
+    _ST_BG = "#1a1a2e"
+    _ST_FG = "#e0e0e0"
+    _ST_HEADER_BG = "#16213e"
+    _ST_GREEN = "#00b894"
+    _ST_RED = "#e94560"
+
+    def _update_client_list(self, clients: list) -> None:
+        if not self._show_gui:
+            return
+        if self._status_win is None or not self._status_win.winfo_exists():
+            self._build_status_window()
+        self._update_status_content(clients)
+
+    def _build_status_window(self) -> None:
+        root = self._root
+        assert root is not None
+
+        win = tk.Toplevel(root)
+        win.title("Alarmsystem \u2014 Status")
+        set_window_icon(win, "alarm_client.ico")
+        win.configure(bg=self._ST_BG)
+        win.geometry("350x300")
+        win.resizable(True, True)
+        win.protocol("WM_DELETE_WINDOW", self._exit_from_tray)
+
+        # Header
+        header = tk.Frame(win, bg=self._ST_HEADER_BG, pady=8)
+        header.pack(fill="x")
+
+        tk.Label(
+            header, text=f"Raum: {self._room_name}",
+            font=("Arial", 12, "bold"), bg=self._ST_HEADER_BG, fg=self._ST_FG,
+        ).pack(anchor="w", padx=10)
+
+        if self._server_info:
+            tk.Label(
+                header, text=f"Server: {self._server_info}",
+                font=("Arial", 9), bg=self._ST_HEADER_BG, fg="#888888",
+            ).pack(anchor="w", padx=10)
+
+        # Separator
+        tk.Frame(win, bg="#333333", height=1).pack(fill="x")
+
+        # Scrollable client list area
+        container = tk.Frame(win, bg=self._ST_BG)
+        container.pack(fill="both", expand=True, padx=10, pady=(8, 4))
+
+        self._status_frame = tk.Frame(container, bg=self._ST_BG)
+        self._status_frame.pack(fill="both", expand=True)
+
+        # Footer (count)
+        self._status_footer = tk.Label(
+            win, text="", font=("Arial", 9), bg=self._ST_BG, fg="#888888",
+            anchor="w", padx=10, pady=4,
+        )
+        self._status_footer.pack(fill="x", side="bottom")
+
+        self._status_win = win
+
+    def _update_status_content(self, clients: list) -> None:
+        frame = self._status_frame
+        if frame is None:
+            return
+
+        # Clear existing content
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+        if not clients:
+            tk.Label(
+                frame, text="Keine Clients verbunden",
+                font=("Arial", 10), bg=self._ST_BG, fg="#888888",
+            ).pack(pady=20)
+            self._status_footer.config(text="Verbundene Clients: 0/0")
+            return
+
+        online_count = 0
+        for c in sorted(clients, key=lambda x: x.get("room", "")):
+            room = c.get("room", "?")
+            is_down = c.get("is_down", False)
+            if not is_down:
+                online_count += 1
+
+            row = tk.Frame(frame, bg=self._ST_BG)
+            row.pack(fill="x", pady=2)
+
+            # Status indicator (colored circle via unicode)
+            color = self._ST_RED if is_down else self._ST_GREEN
+            status_text = "Offline" if is_down else "Online"
+
+            tk.Label(
+                row, text="\u25cf", font=("Arial", 14),
+                bg=self._ST_BG, fg=color,
+            ).pack(side="left", padx=(0, 6))
+
+            tk.Label(
+                row, text=room, font=("Arial", 11, "bold"),
+                bg=self._ST_BG, fg=self._ST_FG,
+            ).pack(side="left")
+
+            tk.Label(
+                row, text=status_text, font=("Arial", 9),
+                bg=self._ST_BG, fg=color,
+            ).pack(side="right", padx=(0, 4))
+
+        total = len(clients)
+        self._status_footer.config(
+            text=f"Verbundene Clients: {online_count}/{total}"
+        )
+
+    # ------------------------------------------------------------------
+    # Tray integration
+    # ------------------------------------------------------------------
+
+    def _restore_from_tray(self) -> None:
+        """Restore the status window from tray. Called from pystray thread."""
+        if self._root and self._status_win:
+            self._root.after(0, self._status_win.deiconify)
+
+    def _exit_from_tray(self) -> None:
+        """Full shutdown from tray exit menu. Called from pystray thread."""
+        if self._stop_client_cb:
+            self._stop_client_cb()
+        else:
+            self.stop()

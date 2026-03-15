@@ -25,7 +25,10 @@ a_installer = Analysis(
     binaries=[],
     datas=[
         # Bundled assets
-        (str(REPO / 'assets' / 'alarm.wav'),      'assets'),
+        (str(REPO / 'assets' / 'alarm.wav'),          'assets'),
+        (str(REPO / 'assets' / 'alarm.ico'),           'assets'),
+        (str(REPO / 'assets' / 'alarm_server.ico'),    'assets'),
+        (str(REPO / 'assets' / 'alarm_client.ico'),    'assets'),
         # Default configs (installer writes its own, but include for reference)
         (str(REPO / 'config' / 'server_config.toml'), 'config'),
         (str(REPO / 'config' / 'client_config.toml'), 'config'),
@@ -48,6 +51,10 @@ a_installer = Analysis(
         # Common
         'common.config',
         'common.protocol',
+        'common.tray_icon',
+        # System tray
+        'pystray',
+        'PIL',
         # stdlib / backport
         'tomllib',
         'tomli',
@@ -78,7 +85,10 @@ a_server = Analysis(
     pathex=[str(REPO)],
     binaries=[],
     datas=[],
-    hiddenimports=['websockets', 'websockets.server', 'common.config', 'common.protocol', 'tomllib', 'tomli'],
+    hiddenimports=['websockets', 'websockets.server', 'common.config', 'common.protocol',
+                   'common.tray_icon', 'pystray', 'PIL',
+                   'server.dashboard', 'server.tray_icon',
+                   'tomllib', 'tomli'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -94,7 +104,8 @@ a_client = Analysis(
         (str(REPO / 'assets' / 'alarm.wav'), 'assets'),
     ],
     hiddenimports=['client.overlay', 'client.sound', 'client.hotkey',
-                   'common.config', 'common.protocol',
+                   'common.config', 'common.protocol', 'common.tray_icon',
+                   'pystray', 'PIL',
                    'websockets', 'pygame', 'pygame.mixer', 'keyboard',
                    'tkinter', 'tkinter.ttk', 'tomllib', 'tomli'],
     hookspath=[],
@@ -134,5 +145,5 @@ exe = EXE(
     entitlements_file=None,
     # Windows: request UAC elevation so Task Scheduler registration works
     uac_admin=True,
-    icon=None,              # Add an .ico path here if you have one
+    icon=str(REPO / 'assets' / 'alarm.ico'),
 )

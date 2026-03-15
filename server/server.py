@@ -3,9 +3,12 @@ server.py — WebSocket hub + health monitor.
 
 Usage:
     python -m server.server [--config path/to/server_config.toml] [--install]
+                            [--gui | --no-gui]
 
     --install   Register a Windows Task Scheduler / macOS launchd auto-start
                 entry and exit.  Run once with admin rights on first deploy.
+    --gui       Show the dashboard GUI (default on Windows).
+    --no-gui    Run headless without GUI.
 """
 
 from __future__ import annotations
@@ -14,7 +17,9 @@ import asyncio
 import logging
 import logging.handlers
 import sys
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -31,6 +36,7 @@ from common.config import ServerConfig, load_server_config
 from common.protocol import (
     AlarmMsg,
     ClientDownMsg,
+    ClientListMsg,
     ClientUpMsg,
     HeartbeatMsg,
     RegisterMsg,
@@ -80,6 +86,17 @@ class ClientEntry:
 
 
 # ---------------------------------------------------------------------------
+# Snapshot (thread-safe read from GUI)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ClientSnapshot:
+    room: str
+    is_down: bool
+    last_heartbeat: float  # time.monotonic() timestamp
+
+
+# ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
 
@@ -90,12 +107,16 @@ class AlarmServer:
         # room_name → ClientEntry
         self._clients: Dict[str, ClientEntry] = {}
         self._lock = asyncio.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._stop_event: Optional[asyncio.Event] = None
 
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._stop_event = asyncio.Event()
         self.log.info(
             "Starting Alarm Server on %s:%d (heartbeat timeout=%ds)",
             self.cfg.host, self.cfg.port, self.cfg.heartbeat_timeout_sec,
@@ -109,8 +130,24 @@ class AlarmServer:
         ):
             await asyncio.gather(
                 self._health_monitor(),
-                asyncio.Future(),   # run forever
+                self._stop_event.wait(),
             )
+
+    # ------------------------------------------------------------------
+    # Thread-safe public API (callable from GUI thread)
+    # ------------------------------------------------------------------
+
+    def get_client_snapshot(self) -> List[ClientSnapshot]:
+        """Return a snapshot of all clients.  GIL-safe for cross-thread reads."""
+        return [
+            ClientSnapshot(room=room, is_down=e.is_down, last_heartbeat=e.last_heartbeat)
+            for room, e in self._clients.items()
+        ]
+
+    def request_shutdown(self) -> None:
+        """Signal the server to stop (thread-safe)."""
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._stop_event.set)
 
     # ------------------------------------------------------------------
     # Per-connection handler
@@ -167,6 +204,7 @@ class AlarmServer:
             else:
                 self._clients[room] = ClientEntry(ws)
                 self.log.info("Room %r registered (total clients: %d)", room, len(self._clients))
+            await self._broadcast_client_list()
 
         return room
 
@@ -180,6 +218,7 @@ class AlarmServer:
                     entry.is_down = False
                     self.log.info("Room %r heartbeat recovered", msg.room)
                     await self._broadcast(ClientUpMsg(room=msg.room), exclude=None)
+                    await self._broadcast_client_list()
 
     async def _on_alarm(self, msg: AlarmMsg) -> None:
         exclude = msg.room if self.cfg.silent_alarm else None
@@ -197,6 +236,7 @@ class AlarmServer:
                 entry.is_down = True
                 self.log.warning("Room %r disconnected", room)
                 await self._broadcast(ClientDownMsg(room=room), exclude=room)
+                await self._broadcast_client_list()
 
     # ------------------------------------------------------------------
     # Health monitor
@@ -216,6 +256,23 @@ class AlarmServer:
                             "Room %r heartbeat timeout (last seen %.1fs ago)", room, age
                         )
                         await self._broadcast(ClientDownMsg(room=room), exclude=room)
+                        await self._broadcast_client_list()
+
+    # ------------------------------------------------------------------
+    # Client list helper
+    # ------------------------------------------------------------------
+
+    def _build_client_list_msg(self) -> ClientListMsg:
+        """Build a client_list message from current state (call inside self._lock)."""
+        clients = [
+            {"room": room, "is_down": entry.is_down}
+            for room, entry in self._clients.items()
+        ]
+        return ClientListMsg(clients=clients)
+
+    async def _broadcast_client_list(self) -> None:
+        """Broadcast the current client list to all connected clients (call inside self._lock)."""
+        await self._broadcast(self._build_client_list_msg(), exclude=None)
 
     # ------------------------------------------------------------------
     # Broadcast helper
@@ -253,6 +310,16 @@ class AlarmServer:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def _run_server_in_thread(server: AlarmServer) -> None:
+    """Run the server's asyncio loop in a background thread."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(server.run())
+    finally:
+        loop.close()
+
+
 def main() -> None:
     import argparse
 
@@ -263,6 +330,11 @@ def main() -> None:
         action="store_true",
         help="Register auto-start task and exit",
     )
+    gui_group = parser.add_mutually_exclusive_group()
+    gui_group.add_argument("--gui", action="store_true", default=None,
+                           help="Show dashboard GUI (default on Windows)")
+    gui_group.add_argument("--no-gui", action="store_true",
+                           help="Run headless without GUI")
     args = parser.parse_args()
 
     cfg = load_server_config(args.config)
@@ -271,7 +343,24 @@ def main() -> None:
         _install_autostart(cfg)
         return
 
-    asyncio.run(AlarmServer(cfg).run())
+    use_gui = args.gui if args.gui is not None else (not args.no_gui and sys.platform == "win32")
+
+    server = AlarmServer(cfg)
+
+    if use_gui:
+        from server.dashboard import ServerDashboard
+
+        bg = threading.Thread(
+            target=_run_server_in_thread, args=(server,),
+            daemon=True, name="asyncio-server",
+        )
+        bg.start()
+        dashboard = ServerDashboard(server, cfg)
+        dashboard.run_mainloop()
+        server.request_shutdown()
+        bg.join(timeout=5)
+    else:
+        asyncio.run(server.run())
 
 
 def _install_autostart(cfg: ServerConfig) -> None:

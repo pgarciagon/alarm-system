@@ -29,7 +29,7 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Embedded module bootstrap — when frozen, add the bundle root to sys.path
@@ -72,10 +72,10 @@ def probe_websocket(host: str, port: int) -> bool:
     try:
         with socket.create_connection((host, port), timeout=PROBE_TIMEOUT) as s:
             s.sendall(
-                f"GET / HTTP/1.1\r\nHost: {host}:{port}\r\n"
-                b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
-                b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-                b"Sec-WebSocket-Version: 13\r\n\r\n"
+                f"GET / HTTP/1.1\r\nHost: {host}:{port}\r\n".encode()
+                + b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                  b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                  b"Sec-WebSocket-Version: 13\r\n\r\n"
             )
             data = s.recv(256)
             return bool(data)
@@ -99,6 +99,7 @@ def get_local_ip() -> str:
 
 def _task_xml(exe: Path, role: str, config_path: Path) -> str:
     desc = f"Alarm System {'Server' if role == 'server' else 'Client'} — auto-start"
+    args = f'--config "{config_path}" --gui'
     return textwrap.dedent(f"""\
         <?xml version="1.0" encoding="UTF-16"?>
         <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -124,7 +125,7 @@ def _task_xml(exe: Path, role: str, config_path: Path) -> str:
           <Actions Context="Author">
             <Exec>
               <Command>{exe}</Command>
-              <Arguments>--config "{config_path}"</Arguments>
+              <Arguments>{args}</Arguments>
               <WorkingDirectory>{exe.parent}</WorkingDirectory>
             </Exec>
           </Actions>
@@ -153,6 +154,74 @@ def register_task(task_name: str, exe: Path, role: str, config_path: Path) -> bo
 
 def start_task(task_name: str) -> None:
     subprocess.run(["schtasks", "/Run", "/TN", task_name], capture_output=True)
+
+
+# ---------------------------------------------------------------------------
+# Shortcut helpers (Windows — uses PowerShell + WScript.Shell COM)
+# ---------------------------------------------------------------------------
+
+def _create_shortcut(lnk_path: Path, target_exe: Path, arguments: str,
+                     description: str, working_dir: Optional[Path] = None,
+                     icon_path: Optional[Path] = None) -> bool:
+    """Create a .lnk shortcut file via PowerShell."""
+    wd = working_dir or target_exe.parent
+    icon_line = ""
+    if icon_path and icon_path.exists():
+        icon_line = f'$s.IconLocation = "{icon_path},0"; '
+    # PowerShell script using COM to create a standard Windows shortcut
+    ps = (
+        f'$ws = New-Object -ComObject WScript.Shell; '
+        f'$s = $ws.CreateShortcut("{lnk_path}"); '
+        f'$s.TargetPath = "{target_exe}"; '
+        f'$s.Arguments = \'{arguments}\'; '
+        f'$s.WorkingDirectory = "{wd}"; '
+        f'$s.Description = "{description}"; '
+        f'{icon_line}'
+        f'$s.Save()'
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def create_shortcuts(exe: Path, role: str, config_path: Path) -> Tuple[bool, bool]:
+    """Create Desktop and Start Menu shortcuts. Returns (desktop_ok, startmenu_ok)."""
+    role_de = "Alarm Server" if role == "server" else "Alarm Client"
+    args = f'--config "{config_path}" --gui'
+    desc = f"Alarmsystem — {role_de}"
+
+    # Copy icon to install dir
+    ico_name = "alarm_server.ico" if role == "server" else "alarm_client.ico"
+    ico_src = _bundle_file(f"assets/{ico_name}")
+    ico_dest = exe.parent / ico_name
+    if ico_src and ico_src.exists():
+        shutil.copy2(ico_src, ico_dest)
+    icon_path = ico_dest if ico_dest.exists() else None
+
+    # Desktop shortcut
+    desktop = Path(os.environ.get("USERPROFILE", "C:\\Users\\Public")) / "Desktop"
+    desktop_ok = _create_shortcut(
+        desktop / f"{role_de}.lnk", exe, args, desc, icon_path=icon_path,
+    )
+
+    # Start Menu shortcut (per-user Programs folder)
+    start_menu = (
+        Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows"
+        / "Start Menu" / "Programs"
+    )
+    if start_menu.exists():
+        startmenu_ok = _create_shortcut(
+            start_menu / f"{role_de}.lnk", exe, args, desc, icon_path=icon_path,
+        )
+    else:
+        startmenu_ok = False
+
+    return desktop_ok, startmenu_ok
 
 
 # ---------------------------------------------------------------------------
@@ -211,11 +280,13 @@ def _copy_exe(role: str, dest: Path) -> Path:
         # Fallback: we ARE the combined binary; copy ourselves
         shutil.copy2(sys.executable, target)
 
-    # Also copy the alarm sound asset
-    wav = _bundle_file("assets/alarm.wav")
-    if wav:
-        (dest / "assets").mkdir(exist_ok=True)
-        shutil.copy2(wav, dest / "assets" / "alarm.wav")
+    # Also copy bundled assets (sound + icons)
+    assets_dest = dest / "assets"
+    assets_dest.mkdir(exist_ok=True)
+    for asset_name in ["alarm.wav", "alarm.ico", "alarm_server.ico", "alarm_client.ico"]:
+        src_asset = _bundle_file(f"assets/{asset_name}")
+        if src_asset:
+            shutil.copy2(src_asset, assets_dest / asset_name)
 
     return target
 
@@ -517,8 +588,10 @@ class InstallerApp(tk.Tk):
                 exe = _copy_exe("server", INSTALL_DIR)
                 cfg = INSTALL_DIR / "server_config.toml"
                 write_server_config(cfg, port, self._silent_var.get())
-                ok = register_task(TASK_SERVER, exe, "server", cfg)
-                self.after(0, lambda: self._finish(ok, "server", exe))
+                task_ok = register_task(TASK_SERVER, exe, "server", cfg)
+                desk_ok, start_ok = create_shortcuts(exe, "server", cfg)
+                self.after(0, lambda: self._finish(task_ok, "server", exe,
+                                                    desk_ok, start_ok))
             except Exception as exc:
                 self.after(0, lambda: self._error(str(exc)))
 
@@ -548,8 +621,10 @@ class InstallerApp(tk.Tk):
                 exe = _copy_exe("client", INSTALL_DIR)
                 cfg = INSTALL_DIR / "client_config.toml"
                 write_client_config(cfg, room, sip, port, hotkey)
-                ok = register_task(TASK_CLIENT, exe, "client", cfg)
-                self.after(0, lambda: self._finish(ok, "client", exe))
+                task_ok = register_task(TASK_CLIENT, exe, "client", cfg)
+                desk_ok, start_ok = create_shortcuts(exe, "client", cfg)
+                self.after(0, lambda: self._finish(task_ok, "client", exe,
+                                                    desk_ok, start_ok))
             except Exception as exc:
                 self.after(0, lambda: self._error(str(exc)))
 
@@ -563,20 +638,25 @@ class InstallerApp(tk.Tk):
         bar.pack()
         bar.start(10)
 
-    def _finish(self, task_ok: bool, role: str, exe: Path) -> None:
+    def _finish(self, task_ok: bool, role: str, exe: Path,
+                desk_ok: bool = False, start_ok: bool = False) -> None:
         self._clear()
 
-        icon = "✔" if task_ok else "⚠"
-        color = self._GREEN if task_ok else self._AMBER
+        all_ok = task_ok and desk_ok and start_ok
+        icon = "✔" if all_ok else "⚠"
+        color = self._GREEN if all_ok else self._AMBER
         role_de = "Server" if role == "server" else "Client"
 
         tk.Label(self, text=f"{icon}  Installation abgeschlossen",
                  font=("Arial", 18, "bold"), bg=self._BG, fg=color).pack(pady=(40, 15))
 
+        _ok = lambda v: "✔" if v else "✘"
         info = [
-            f"Rolle:      {role_de}",
-            f"Programm:   {exe}",
-            f"Autostart:  {'Registriert ✔' if task_ok else 'Fehler — bitte manuell einrichten'}",
+            f"Rolle:         {role_de}",
+            f"Programm:      {exe}",
+            f"Autostart:     {_ok(task_ok)}  {'Registriert' if task_ok else 'Fehler — bitte manuell einrichten'}",
+            f"Desktop:       {_ok(desk_ok)}  {'Verknüpfung erstellt' if desk_ok else 'Fehler'}",
+            f"Startmenü:     {_ok(start_ok)}  {'Verknüpfung erstellt' if start_ok else 'Fehler'}",
         ]
         for line in info:
             tk.Label(self, text=line, font=("Arial", 10),
@@ -630,8 +710,31 @@ class InstallerApp(tk.Tk):
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _detect_role_from_exe() -> Optional[str]:
+    """If we were copied/renamed to alarm_server.exe or alarm_client.exe,
+    return the role so we can dispatch to the real module."""
+    exe_name = Path(sys.executable).stem.lower()
+    if exe_name == "alarm_server":
+        return "server"
+    elif exe_name == "alarm_client":
+        return "client"
+    return None
+
+
 def main() -> None:
-    # On Windows, request a UAC elevation prompt if not already admin.
+    # When the combined installer is copied as alarm_server.exe or
+    # alarm_client.exe, dispatch directly to the correct module's main().
+    role = _detect_role_from_exe()
+    if role == "server":
+        from server.server import main as server_main
+        server_main()
+        return
+    elif role == "client":
+        from client.client import main as client_main
+        client_main()
+        return
+
+    # Otherwise we're running as the installer — request UAC elevation.
     if sys.platform == "win32":
         try:
             import ctypes

@@ -49,6 +49,7 @@ from common.protocol import (
     encode,
     MSG_ALARM,
     MSG_CLIENT_DOWN,
+    MSG_CLIENT_LIST,
     MSG_CLIENT_UP,
 )
 from client.hotkey import make_hotkey_listener
@@ -200,6 +201,8 @@ class _AsyncCore:
             elif msg.type == MSG_CLIENT_UP:
                 self.log.info("Client up: room %r", msg.room)  # type: ignore[union-attr]
                 self._overlay.show_banner(msg.room, up=True)  # type: ignore[union-attr]
+            elif msg.type == MSG_CLIENT_LIST:
+                self._overlay.update_client_list(msg.clients)  # type: ignore[union-attr]
 
     # ------------------------------------------------------------------
     # Heartbeat loop
@@ -244,11 +247,18 @@ class _AsyncCore:
 # ---------------------------------------------------------------------------
 
 class AlarmClient:
-    def __init__(self, cfg: ClientConfig, fallback_hotkey: bool = False) -> None:
+    def __init__(self, cfg: ClientConfig, fallback_hotkey: bool = False,
+                 show_gui: bool = True) -> None:
         self.cfg = cfg
         self.log = _setup_logging(cfg.log_file)
         self._sound = SoundPlayer(cfg.alarm_sound)
-        self._overlay = OverlayManager(stop_sound_cb=self._sound.stop)
+        self._overlay = OverlayManager(
+            stop_sound_cb=self._sound.stop,
+            show_gui=show_gui,
+            room_name=cfg.room_name,
+            server_info=f"{cfg.server_ip}:{cfg.server_port}",
+            stop_client_cb=self.stop,
+        )
         self._core = _AsyncCore(
             cfg=cfg,
             overlay=self._overlay,
@@ -297,6 +307,11 @@ def main() -> None:
                         help="Use terminal-input fallback hotkey (type 'a'+Enter)")
     parser.add_argument("--install",         action="store_true",
                         help="Register auto-start task and exit")
+    gui_group = parser.add_mutually_exclusive_group()
+    gui_group.add_argument("--gui", action="store_true", default=None,
+                           help="Show status GUI (default)")
+    gui_group.add_argument("--no-gui", action="store_true",
+                           help="Run without status GUI")
     args = parser.parse_args()
 
     cfg = load_client_config(args.config)
@@ -305,7 +320,8 @@ def main() -> None:
         _install_autostart(cfg)
         return
 
-    client = AlarmClient(cfg, fallback_hotkey=args.fallback_hotkey)
+    show_gui = args.gui if args.gui is not None else (not args.no_gui)
+    client = AlarmClient(cfg, fallback_hotkey=args.fallback_hotkey, show_gui=show_gui)
 
     def _sigint(_sig, _frame):
         print("\nShutting down…")
