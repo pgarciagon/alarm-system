@@ -21,11 +21,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
+import os
 import signal
 import sys
 import threading
 from pathlib import Path
 from typing import Optional
+
+# Suppress pygame startup banner before any pygame import happens
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+# Tell SDL not to touch the display server (avoids Tcl notifier conflict on macOS)
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
