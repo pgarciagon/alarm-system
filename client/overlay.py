@@ -153,10 +153,10 @@ class OverlayManager:
         if self._alarm_win and self._alarm_win.winfo_exists():
             try:
                 self._alarm_win._room_label.config(  # type: ignore[attr-defined]
-                    text=f"\u26a0  ALARM \u2014 {room.upper()}  \u26a0"
+                    text=f"\u26a0  ALARM \u2014 ZIMMER {room.upper()}  \u26a0"
                 )
                 self._alarm_win._time_label.config(  # type: ignore[attr-defined]
-                    text=f"Triggered at {datetime.now().strftime('%H:%M:%S')}"
+                    text=f"Ausgelöst um {datetime.now().strftime('%H:%M:%S')}"
                 )
             except Exception:
                 pass
@@ -170,7 +170,7 @@ class OverlayManager:
         sh = root.winfo_screenheight()
 
         win = tk.Toplevel(root)
-        win.title("ALARM")
+        win.title("NOTFALL")
         # On macOS, -fullscreen True conflicts with overrideredirect; use
         # explicit geometry to cover the full screen instead.
         win.geometry(f"{sw}x{sh}+0+0")
@@ -184,7 +184,7 @@ class OverlayManager:
 
         room_lbl = tk.Label(
             win,
-            text=f"\u26a0  ALARM \u2014 {room.upper()}  \u26a0",
+            text=f"\u26a0  ALARM \u2014 ZIMMER {room.upper()}  \u26a0",
             font=("Arial", 72, "bold"),
             bg=_RED_BRIGHT,
             fg=_WHITE,
@@ -195,7 +195,7 @@ class OverlayManager:
 
         time_lbl = tk.Label(
             win,
-            text=f"Triggered at {timestamp}",
+            text=f"Ausgelöst um {timestamp}",
             font=("Arial", 28),
             bg=_RED_BRIGHT,
             fg=_WHITE,
@@ -204,7 +204,7 @@ class OverlayManager:
 
         dismiss_btn = tk.Button(
             win,
-            text="DISMISS  (ESC)",
+            text="BESTÄTIGEN  (ESC)",
             font=("Arial", 24, "bold"),
             bg=_WHITE,
             fg=_RED_BRIGHT,
@@ -274,9 +274,9 @@ class OverlayManager:
 
         bg  = _GREEN if up else _AMBER
         msg = (
-            f"Alert system RESTORED on {room}"
+            f"Alarmsystem WIEDERHERGESTELLT in {room}"
             if up else
-            f"Alert system NOT WORKING on {room}"
+            f"Alarmsystem NICHT VERFÜGBAR in {room}"
         )
 
         root = self._root
