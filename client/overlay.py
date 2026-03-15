@@ -269,16 +269,19 @@ class OverlayManager:
         root = self._root
         assert root is not None
 
+        # Query screen dimensions from root (already mapped) — querying from
+        # a freshly-created unmapped Toplevel can return 0 on macOS.
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        banner_h = 60
+        # Calculate offset *before* adding to dict so stacking is correct.
+        offset   = len(self._banner_wins) * (banner_h + 5)
+
         win = tk.Toplevel(root)
         win.title("")
         win.attributes("-topmost", True)
         win.overrideredirect(True)
         win.configure(bg=bg)
-
-        screen_w = win.winfo_screenwidth()
-        screen_h = win.winfo_screenheight()
-        banner_h = 60
-        offset   = len(self._banner_wins) * (banner_h + 5)
         win.geometry(f"500x{banner_h}+{screen_w - 510}+{screen_h - 80 - offset}")
 
         tk.Label(
@@ -290,11 +293,15 @@ class OverlayManager:
             padx=10,
         ).pack(expand=True, fill="both")
 
+        win.lift()
+        win.update_idletasks()
+
         self._banner_wins[room] = win
         log.log(logging.INFO if up else logging.WARNING, "Banner: %s", msg)
 
-        if up:
-            root.after(5000, lambda: self._remove_banner(room))
+        # Always auto-dismiss after a few seconds so banners don't pile up.
+        dismiss_ms = 5000 if up else 8000
+        root.after(dismiss_ms, lambda: self._remove_banner(room))
 
     def _remove_banner(self, room: str) -> None:
         win = self._banner_wins.pop(room, None)
