@@ -61,6 +61,8 @@ class ServerDashboard:
         self._root.configure(bg=_BG)
         self._root.geometry("620x460")
         self._root.minsize(500, 350)
+        # Hide from taskbar — only show in system tray
+        self._root.attributes("-toolwindow", True)
         self._root.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
 
         self._build_config_section()
@@ -90,11 +92,20 @@ class ServerDashboard:
         frame = tk.Frame(self._root, bg=_HEADER_BG, padx=15, pady=10)
         frame.pack(fill=tk.X, padx=10, pady=(10, 5))
 
-        title = tk.Label(
-            frame, text="Server-Konfiguration", font=("Arial", 14, "bold"),
+        # Title row with shutdown button
+        title_row = tk.Frame(frame, bg=_HEADER_BG)
+        title_row.pack(fill=tk.X)
+
+        tk.Label(
+            title_row, text="Server-Konfiguration", font=("Arial", 14, "bold"),
             fg=_ACCENT, bg=_HEADER_BG, anchor="w",
-        )
-        title.pack(fill=tk.X)
+        ).pack(side=tk.LEFT)
+
+        tk.Button(
+            title_row, text="Beenden", font=("Arial", 9),
+            bg=_RED, fg="white", relief="flat", padx=10, pady=2,
+            cursor="hand2", command=self._exit,
+        ).pack(side=tk.RIGHT)
 
         info_frame = tk.Frame(frame, bg=_HEADER_BG)
         info_frame.pack(fill=tk.X, pady=(5, 0))

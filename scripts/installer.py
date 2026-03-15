@@ -192,7 +192,6 @@ def _create_shortcut(lnk_path: Path, target_exe: Path, arguments: str,
 def create_shortcuts(exe: Path, role: str, config_path: Path) -> Tuple[bool, bool]:
     """Create Desktop and Start Menu shortcuts. Returns (desktop_ok, startmenu_ok)."""
     role_de = "Alarm Server" if role == "server" else "Alarm Client"
-    args = f'--config "{config_path}" --gui'
     desc = f"Alarmsystem — {role_de}"
 
     # Copy icon to install dir
@@ -203,10 +202,27 @@ def create_shortcuts(exe: Path, role: str, config_path: Path) -> Tuple[bool, boo
         shutil.copy2(ico_src, ico_dest)
     icon_path = ico_dest if ico_dest.exists() else None
 
+    if getattr(sys, "frozen", False):
+        # Frozen: shortcut points to the renamed exe
+        target = exe
+        args = f'--config "{config_path}" --gui'
+        work_dir = exe.parent
+    else:
+        # Unfrozen (dev): shortcut points to pythonw.exe with -m module
+        repo_root = Path(__file__).parent.parent.resolve()
+        python_dir = Path(sys.executable).resolve().parent
+        # Use pythonw.exe (no console window) if available
+        pythonw = python_dir / "pythonw.exe"
+        target = pythonw if pythonw.exists() else Path(sys.executable).resolve()
+        module = "server.server" if role == "server" else "client.client"
+        args = f'-m {module} --config "{config_path}" --gui'
+        work_dir = repo_root
+
     # Desktop shortcut
     desktop = Path(os.environ.get("USERPROFILE", "C:\\Users\\Public")) / "Desktop"
     desktop_ok = _create_shortcut(
-        desktop / f"{role_de}.lnk", exe, args, desc, icon_path=icon_path,
+        desktop / f"{role_de}.lnk", target, args, desc,
+        working_dir=work_dir, icon_path=icon_path,
     )
 
     # Start Menu shortcut (per-user Programs folder)
@@ -216,7 +232,8 @@ def create_shortcuts(exe: Path, role: str, config_path: Path) -> Tuple[bool, boo
     )
     if start_menu.exists():
         startmenu_ok = _create_shortcut(
-            start_menu / f"{role_de}.lnk", exe, args, desc, icon_path=icon_path,
+            start_menu / f"{role_de}.lnk", target, args, desc,
+            working_dir=work_dir, icon_path=icon_path,
         )
     else:
         startmenu_ok = False
@@ -266,19 +283,39 @@ def _bundle_file(rel: str) -> Optional[Path]:
 
 
 def _copy_exe(role: str, dest: Path) -> Path:
-    """Copy the appropriate embedded exe (or this installer itself) to dest."""
-    dest.mkdir(parents=True, exist_ok=True)
-    name = "alarm_server.exe" if role == "server" else "alarm_client.exe"
-    target = dest / name
+    """Copy the appropriate exe to *dest* and return the launch target.
 
-    # When frozen, PyInstaller embeds both server and client entry points
-    # as separate executables in _MEIPASS.
-    src = _bundle_file(name)
-    if src and src != target:
-        shutil.copy2(src, target)
-    elif not src:
-        # Fallback: we ARE the combined binary; copy ourselves
-        shutil.copy2(sys.executable, target)
+    Frozen (PyInstaller): copies the combined installer exe as
+    alarm_server.exe / alarm_client.exe — the entry point detects its
+    filename and dispatches to the correct module.
+
+    Unfrozen (development): creates a .bat launcher that invokes the
+    Python module directly, since copying python.exe is useless.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    module = "server.server" if role == "server" else "client.client"
+    exe_name = "alarm_server.exe" if role == "server" else "alarm_client.exe"
+
+    if getattr(sys, "frozen", False):
+        # Frozen: copy ourselves (the combined installer binary)
+        target = dest / exe_name
+        src = _bundle_file(exe_name)
+        if src and src != target:
+            shutil.copy2(src, target)
+        else:
+            shutil.copy2(sys.executable, target)
+    else:
+        # Unfrozen (dev): create a .bat launcher instead
+        repo_root = Path(__file__).parent.parent.resolve()
+        python_exe = Path(sys.executable).resolve()
+        bat_name = "alarm_server.bat" if role == "server" else "alarm_client.bat"
+        target = dest / bat_name
+        target.write_text(
+            f'@echo off\r\n'
+            f'cd /d "{repo_root}"\r\n'
+            f'"{python_exe}" -m {module} %*\r\n',
+            encoding="utf-8",
+        )
 
     # Also copy bundled assets (sound + icons)
     assets_dest = dest / "assets"
@@ -437,13 +474,16 @@ class InstallerApp(tk.Tk):
                 msg = "✔  Kein Server gefunden — dieser PC wird zum Server."
                 color = self._GREEN
         else:
-            # Try to auto-detect server on common LAN addresses
+            # Try to auto-detect server: localhost first, then LAN
             local_ip = get_local_ip()
             prefix = ".".join(local_ip.split(".")[:3])
             found_ip: Optional[str] = None
 
-            # Check gateway (.1) and a few common server addresses first
-            candidates = [f"{prefix}.1", f"{prefix}.100", f"{prefix}.200"]
+            # Check localhost, own IP, gateway, and common addresses
+            candidates = [
+                "127.0.0.1", local_ip,
+                f"{prefix}.1", f"{prefix}.100", f"{prefix}.200",
+            ]
             for ip in candidates:
                 if probe_server(ip, port):
                     found_ip = ip

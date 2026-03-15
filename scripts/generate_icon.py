@@ -1,7 +1,11 @@
 """Generate alarm system .ico files for server and client.
 
 Uses 4x supersampling for clean anti-aliased edges at every size.
+Pillow's ICO append_images is broken in many versions, so we build
+the ICO binary manually.
 """
+import io
+import struct
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -117,16 +121,50 @@ def _render_bell(size: int, bell_color: str, bg_color: str) -> Image.Image:
     return img.resize((size, size), Image.LANCZOS)
 
 
+def _save_ico(images: list, path: Path) -> None:
+    """Write a proper multi-resolution ICO file manually.
+
+    Pillow's ICO save with append_images silently drops extra frames
+    in many versions, so we construct the binary ourselves.
+    """
+    count = len(images)
+    # ICO header: reserved(2) + type(2) + image_count(2)
+    header = struct.pack("<HHH", 0, 1, count)
+
+    dir_size = 16 * count
+    data_offset = 6 + dir_size
+
+    entries: list[bytes] = []
+    blobs: list[bytes] = []
+
+    for img in images:
+        img = img.convert("RGBA")
+        w, h = img.size
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        data = buf.getvalue()
+
+        bw = 0 if w >= 256 else w
+        bh = 0 if h >= 256 else h
+        entries.append(struct.pack("<BBBBHHII",
+            bw, bh, 0, 0, 1, 32, len(data), data_offset))
+        blobs.append(data)
+        data_offset += len(data)
+
+    with open(path, "wb") as f:
+        f.write(header)
+        for e in entries:
+            f.write(e)
+        for b in blobs:
+            f.write(b)
+
+
 def create_icon(path: Path, bell_color: str, bg_color: str) -> None:
     """Create a multi-resolution .ico file."""
     sizes = [16, 24, 32, 48, 64, 128, 256]
     images = [_render_bell(sz, bell_color, bg_color) for sz in sizes]
-    images[0].save(
-        str(path), format="ICO",
-        sizes=[(sz, sz) for sz in sizes],
-        append_images=images[1:],
-    )
-    print(f"Created: {path}")
+    _save_ico(images, path)
+    print(f"Created: {path}  ({path.stat().st_size:,} bytes)")
 
 
 if __name__ == "__main__":

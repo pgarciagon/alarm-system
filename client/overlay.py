@@ -392,16 +392,28 @@ class OverlayManager:
         win.configure(bg=self._ST_BG)
         win.geometry("350x300")
         win.resizable(True, True)
+        # Hide from taskbar — only show in system tray
+        win.attributes("-toolwindow", True)
         win.protocol("WM_DELETE_WINDOW", self._exit_from_tray)
 
         # Header
         header = tk.Frame(win, bg=self._ST_HEADER_BG, pady=8)
         header.pack(fill="x")
 
+        # Title row with shutdown button
+        title_row = tk.Frame(header, bg=self._ST_HEADER_BG)
+        title_row.pack(fill="x", padx=10)
+
         tk.Label(
-            header, text=f"Raum: {self._room_name}",
+            title_row, text=f"Raum: {self._room_name}",
             font=("Arial", 12, "bold"), bg=self._ST_HEADER_BG, fg=self._ST_FG,
-        ).pack(anchor="w", padx=10)
+        ).pack(side="left")
+
+        tk.Button(
+            title_row, text="Beenden", font=("Arial", 9),
+            bg=self._ST_RED, fg="white", relief="flat", padx=10, pady=2,
+            cursor="hand2", command=self._exit_from_tray,
+        ).pack(side="right")
 
         if self._server_info:
             tk.Label(
