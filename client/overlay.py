@@ -1,22 +1,24 @@
 """
 overlay.py — Full-screen alarm overlay using tkinter.
 
-The overlay is always-on-top, covers the entire screen, flashes red/dark-red,
-and displays the room name.  A small amber banner shows client-down warnings.
+macOS AppKit rule: NSWindow (and therefore tkinter) MUST be driven on the
+main OS thread.  This module therefore does NOT own a background thread.
+Instead the caller is responsible for running tkinter on the main thread
+(see client.py for how asyncio is moved to a background thread instead).
 
-The overlay runs in its OWN thread because tkinter must be driven from the
-thread that created it.  All external calls go through thread-safe queues.
+Thread-safe API: any thread can call show_alarm(), hide_alarm(),
+show_banner() and stop() — they post commands through a queue; the main
+thread drains the queue via a tkinter `after` callback.
 """
 
 from __future__ import annotations
 
 import logging
 import queue
-import threading
 import tkinter as tk
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Dict, Optional
 
 log = logging.getLogger("alarm.client.overlay")
 
@@ -28,10 +30,10 @@ _RED_BRIGHT = "#CC0000"
 _RED_DARK   = "#7A0000"
 _AMBER      = "#CC7700"
 _WHITE      = "#FFFFFF"
-_BLACK      = "#000000"
+_GREEN      = "#006600"
 
 # ---------------------------------------------------------------------------
-# Internal command objects (sent via queue to the overlay thread)
+# Internal command objects
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -45,7 +47,7 @@ class _HideAlarm:
 @dataclass
 class _ShowBanner:
     room: str
-    up: bool   # True → client_up  (green), False → client_down (amber)
+    up: bool
 
 @dataclass
 class _Stop:
@@ -53,37 +55,33 @@ class _Stop:
 
 
 # ---------------------------------------------------------------------------
-# Overlay manager
+# Overlay manager  (main-thread only)
 # ---------------------------------------------------------------------------
 
 class OverlayManager:
     """
-    Manages the tkinter overlay in a dedicated daemon thread.
+    Drives the tkinter alarm overlay.
 
-    Usage::
-
-        mgr = OverlayManager()
-        mgr.start()
-        mgr.show_alarm("Room 3")
-        mgr.hide_alarm()
-        mgr.show_banner("Room 5", up=False)
-        mgr.stop()
+    Must be created and used via ``run_mainloop()`` on the main thread.
+    Other threads call the public methods (show_alarm, hide_alarm, …)
+    which are thread-safe — they push commands into a queue that the
+    main-thread poll loop drains every 50 ms.
     """
+
+    POLL_MS  = 50
+    FLASH_MS = 500
 
     def __init__(self) -> None:
         self._q: queue.Queue = queue.Queue()
-        self._thread: Optional[threading.Thread] = None
+        self._root: Optional[tk.Tk] = None
+        self._alarm_win: Optional[tk.Toplevel] = None
+        self._banner_wins: Dict[str, tk.Toplevel] = {}
+        self._flash_bright = True
+        self._flash_job: Optional[str] = None
 
-    def start(self) -> None:
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="overlay-thread"
-        )
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._q.put(_Stop())
-        if self._thread:
-            self._thread.join(timeout=3)
+    # ------------------------------------------------------------------
+    # Thread-safe public API  (callable from any thread)
+    # ------------------------------------------------------------------
 
     def show_alarm(self, room: str) -> None:
         self._q.put(_ShowAlarm(room=room))
@@ -94,57 +92,39 @@ class OverlayManager:
     def show_banner(self, room: str, up: bool) -> None:
         self._q.put(_ShowBanner(room=room, up=up))
 
-    # ------------------------------------------------------------------
-    # Overlay thread
-    # ------------------------------------------------------------------
-
-    def _run(self) -> None:
-        root = tk.Tk()
-        root.withdraw()   # hidden root, just to anchor child windows
-
-        state = _OverlayState(root, self._q)
-        state.poll()
-        root.mainloop()
+    def stop(self) -> None:
+        self._q.put(_Stop())
 
     # ------------------------------------------------------------------
-    # Public convenience: wait for the thread to be ready (optional)
+    # Main-thread entry point
     # ------------------------------------------------------------------
 
-    def join(self) -> None:
-        if self._thread:
-            self._thread.join()
-
-
-# ---------------------------------------------------------------------------
-# Internal state (lives inside the overlay thread)
-# ---------------------------------------------------------------------------
-
-class _OverlayState:
-    FLASH_INTERVAL_MS = 500
-    POLL_INTERVAL_MS  = 50    # how often we check the command queue
-
-    def __init__(self, root: tk.Tk, q: queue.Queue) -> None:
-        self._root = root
-        self._q = q
-        self._alarm_win: Optional[tk.Toplevel] = None
-        self._banner_wins: dict[str, tk.Toplevel] = {}
-        self._flash_bright = True
-        self._flash_job: Optional[str] = None
+    def run_mainloop(self) -> None:
+        """
+        Initialise tkinter and run the event loop.
+        Blocks until stop() is called.
+        Must be called from the main thread.
+        """
+        self._root = tk.Tk()
+        self._root.withdraw()          # invisible root window
+        self._root.after(self.POLL_MS, self._poll)
+        self._root.mainloop()
 
     # ------------------------------------------------------------------
-    # Queue poll
+    # Internal poll (main thread only)
     # ------------------------------------------------------------------
 
-    def poll(self) -> None:
-        """Drain the command queue and schedule the next poll."""
+    def _poll(self) -> None:
         try:
             while True:
                 cmd = self._q.get_nowait()
                 self._dispatch(cmd)
+                if isinstance(cmd, _Stop):
+                    return   # do not reschedule after quit
         except queue.Empty:
             pass
-
-        self._root.after(self.POLL_INTERVAL_MS, self.poll)
+        if self._root:
+            self._root.after(self.POLL_MS, self._poll)
 
     def _dispatch(self, cmd) -> None:
         if isinstance(cmd, _ShowAlarm):
@@ -154,7 +134,8 @@ class _OverlayState:
         elif isinstance(cmd, _ShowBanner):
             self._show_banner(cmd.room, cmd.up)
         elif isinstance(cmd, _Stop):
-            self._root.quit()
+            if self._root:
+                self._root.quit()
 
     # ------------------------------------------------------------------
     # Alarm overlay
@@ -162,10 +143,9 @@ class _OverlayState:
 
     def _show_alarm(self, room: str) -> None:
         if self._alarm_win and self._alarm_win.winfo_exists():
-            # Already showing — just update the room name label
             try:
                 self._alarm_win._room_label.config(  # type: ignore[attr-defined]
-                    text=f"\u26a0  ALARM — {room.upper()}  \u26a0"
+                    text=f"\u26a0  ALARM \u2014 {room.upper()}  \u26a0"
                 )
                 self._alarm_win._time_label.config(  # type: ignore[attr-defined]
                     text=f"Triggered at {datetime.now().strftime('%H:%M:%S')}"
@@ -174,24 +154,22 @@ class _OverlayState:
                 pass
             return
 
-        win = tk.Toplevel(self._root)
-        win.title("ALARM")
+        root = self._root
+        assert root is not None
 
-        # Full-screen, always on top, no window decorations
+        win = tk.Toplevel(root)
+        win.title("ALARM")
         win.attributes("-fullscreen", True)
         win.attributes("-topmost", True)
         win.overrideredirect(True)
         win.configure(bg=_RED_BRIGHT)
-
-        # Prevent the window from being closed by the OS (e.g. Alt+F4 on Win)
         win.protocol("WM_DELETE_WINDOW", lambda: None)
 
         timestamp = datetime.now().strftime("%H:%M:%S")
 
-        # Main alarm label
         room_lbl = tk.Label(
             win,
-            text=f"\u26a0  ALARM — {room.upper()}  \u26a0",
+            text=f"\u26a0  ALARM \u2014 {room.upper()}  \u26a0",
             font=("Arial", 72, "bold"),
             bg=_RED_BRIGHT,
             fg=_WHITE,
@@ -222,22 +200,18 @@ class _OverlayState:
         )
         dismiss_btn.pack(pady=40)
 
-        # Attach references for later updates
         win._room_label = room_lbl  # type: ignore[attr-defined]
         win._time_label = time_lbl  # type: ignore[attr-defined]
 
-        # ESC to dismiss
         win.bind("<Escape>", lambda _e: self._hide_alarm())
-        win.bind("<Button-1>", lambda _e: None)   # absorb stray clicks
 
         self._alarm_win = win
         self._flash_bright = True
         self._start_flash()
-
         log.info("Alarm overlay shown for room %r", room)
 
     def _hide_alarm(self) -> None:
-        if self._flash_job:
+        if self._flash_job and self._root:
             try:
                 self._root.after_cancel(self._flash_job)
             except Exception:
@@ -250,7 +224,7 @@ class _OverlayState:
             log.info("Alarm overlay dismissed")
 
     def _start_flash(self) -> None:
-        if not self._alarm_win or not self._alarm_win.winfo_exists():
+        if not self._alarm_win or not self._alarm_win.winfo_exists() or not self._root:
             return
         colour = _RED_BRIGHT if self._flash_bright else _RED_DARK
         self._flash_bright = not self._flash_bright
@@ -263,58 +237,57 @@ class _OverlayState:
                     pass
         except Exception:
             return
-        self._flash_job = self._root.after(self.FLASH_INTERVAL_MS, self._start_flash)
+        self._flash_job = self._root.after(self.FLASH_MS, self._start_flash)
 
     # ------------------------------------------------------------------
-    # Status banner (client_down / client_up)
+    # Status banner
     # ------------------------------------------------------------------
 
     def _show_banner(self, room: str, up: bool) -> None:
-        # Destroy existing banner for this room if any
         existing = self._banner_wins.get(room)
         if existing:
             try:
                 existing.destroy()
             except Exception:
                 pass
+            self._banner_wins.pop(room, None)
 
-        if up:
-            msg = f"Alert system RESTORED on {room}"
-            bg = "#006600"
-        else:
-            msg = f"Alert system NOT WORKING on {room}"
-            bg = _AMBER
+        bg  = _GREEN if up else _AMBER
+        msg = (
+            f"Alert system RESTORED on {room}"
+            if up else
+            f"Alert system NOT WORKING on {room}"
+        )
 
-        win = tk.Toplevel(self._root)
+        root = self._root
+        assert root is not None
+
+        win = tk.Toplevel(root)
         win.title("")
         win.attributes("-topmost", True)
         win.overrideredirect(True)
         win.configure(bg=bg)
 
-        # Position in bottom-right corner, stacking upward
         screen_w = win.winfo_screenwidth()
         screen_h = win.winfo_screenheight()
         banner_h = 60
-        offset = len(self._banner_wins) * (banner_h + 5)
+        offset   = len(self._banner_wins) * (banner_h + 5)
         win.geometry(f"500x{banner_h}+{screen_w - 510}+{screen_h - 80 - offset}")
 
-        lbl = tk.Label(
+        tk.Label(
             win,
             text=msg,
             font=("Arial", 14, "bold"),
             bg=bg,
             fg=_WHITE,
             padx=10,
-        )
-        lbl.pack(expand=True, fill="both")
+        ).pack(expand=True, fill="both")
 
         self._banner_wins[room] = win
+        log.log(logging.INFO if up else logging.WARNING, "Banner: %s", msg)
 
         if up:
-            # Auto-dismiss "restored" banners after 5 s
-            self._root.after(5000, lambda: self._remove_banner(room))
-        else:
-            log.warning("Banner: %s", msg)
+            root.after(5000, lambda: self._remove_banner(room))
 
     def _remove_banner(self, room: str) -> None:
         win = self._banner_wins.pop(room, None)

@@ -1,14 +1,18 @@
 """
 client.py — WebSocket client with reconnect loop, hotkey, overlay and sound.
 
+macOS AppKit requires tkinter to run on the main OS thread.
+Therefore this module runs asyncio in a background daemon thread and
+keeps the main thread for tkinter's mainloop().
+
 Usage:
     python -m client.client [--config path/to/client_config.toml]
                              [--fallback-hotkey]
                              [--install]
 
     --fallback-hotkey   Use terminal-input hotkey (type 'a'+Enter) instead of
-                        the global keyboard hook.  Useful for simulation on
-                        macOS when Accessibility permission is not granted.
+                        the global keyboard hook.  Useful for macOS simulation
+                        when Accessibility permission is not granted.
     --install           Register auto-start task and exit.
 """
 
@@ -70,36 +74,47 @@ def _setup_logging(log_file: str) -> logging.Logger:
 
 
 # ---------------------------------------------------------------------------
-# Alarm client
+# Async network + hotkey core  (runs in background thread)
 # ---------------------------------------------------------------------------
 
-class AlarmClient:
-    # Reconnect back-off: 1, 2, 4, 8, 16, 30, 30, … seconds
-    _BACKOFF_SEQUENCE = [1, 2, 4, 8, 16, 30]
+class _AsyncCore:
+    """Everything that lives inside the asyncio event loop."""
 
-    def __init__(self, cfg: ClientConfig, fallback_hotkey: bool = False) -> None:
+    _BACKOFF = [1, 2, 4, 8, 16, 30]
+
+    def __init__(
+        self,
+        cfg: ClientConfig,
+        overlay: OverlayManager,
+        sound: SoundPlayer,
+        log: logging.Logger,
+        fallback_hotkey: bool,
+    ) -> None:
         self.cfg = cfg
-        self.log = _setup_logging(cfg.log_file)
+        self._overlay = overlay
+        self._sound = sound
+        self.log = log
         self._fallback_hotkey = fallback_hotkey
-
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
-        self._ws_lock = asyncio.Lock()
-        self._alarm_pending: asyncio.Event  # set by hotkey thread, consumed by async loop
-        self._overlay = OverlayManager()
-        self._sound = SoundPlayer(cfg.alarm_sound)
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._alarm_pending: Optional[asyncio.Event] = None
         self._running = True
 
-    async def run(self) -> None:
-        # asyncio.Event must be created inside the running loop
-        self._alarm_pending = asyncio.Event()
+    # ------------------------------------------------------------------
+    # Entry point — called from the asyncio background thread
+    # ------------------------------------------------------------------
 
-        self._overlay.start()
-        self._start_hotkey()
-
+    def run_in_thread(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
         try:
-            await self._connect_loop()
+            self._loop.run_until_complete(self._main())
         finally:
-            self._overlay.stop()
+            self._loop.close()
+
+    async def _main(self) -> None:
+        self._alarm_pending = asyncio.Event()
+        self._start_hotkey()
+        await self._connect_loop()
 
     # ------------------------------------------------------------------
     # Hotkey
@@ -115,17 +130,12 @@ class AlarmClient:
         self.log.info("Hotkey listener started (%s)", self.cfg.hotkey)
 
     def _on_hotkey_pressed(self) -> None:
-        """Called from the keyboard thread — schedules alarm in the async loop."""
         self.log.info("Hotkey pressed — queuing alarm for room %r", self.cfg.room_name)
-        # Thread-safe bridge: set an asyncio Event from a non-async thread
-        try:
-            loop = asyncio.get_event_loop()
-            loop.call_soon_threadsafe(self._alarm_pending.set)
-        except RuntimeError:
-            pass
+        if self._loop and self._alarm_pending:
+            self._loop.call_soon_threadsafe(self._alarm_pending.set)
 
     # ------------------------------------------------------------------
-    # Connection loop (reconnect with back-off)
+    # Connection loop
     # ------------------------------------------------------------------
 
     async def _connect_loop(self) -> None:
@@ -133,28 +143,22 @@ class AlarmClient:
         attempt = 0
 
         while self._running:
-            delay = self._BACKOFF_SEQUENCE[min(attempt, len(self._BACKOFF_SEQUENCE) - 1)]
+            delay = self._BACKOFF[min(attempt, len(self._BACKOFF) - 1)]
             if attempt > 0:
                 self.log.info("Reconnecting in %ds (attempt %d)…", delay, attempt)
                 await asyncio.sleep(delay)
 
             try:
-                self.log.info("Connecting to server at %s…", uri)
+                self.log.info("Connecting to %s…", uri)
                 async with websockets.connect(
                     uri,
                     ping_interval=20,
                     ping_timeout=30,
                     open_timeout=10,
                 ) as ws:
-                    async with self._ws_lock:
-                        self._ws = ws
-                    attempt = 0   # reset back-off on successful connect
+                    attempt = 0
                     self.log.info("Connected to server")
-
-                    # Register this room
                     await ws.send(encode(RegisterMsg(room=self.cfg.room_name)))
-
-                    # Run receive + heartbeat + alarm-send concurrently
                     await asyncio.gather(
                         self._receive_loop(ws),
                         self._heartbeat_loop(ws),
@@ -166,8 +170,6 @@ class AlarmClient:
             except asyncio.CancelledError:
                 break
             finally:
-                async with self._ws_lock:
-                    self._ws = None
                 attempt += 1
 
     # ------------------------------------------------------------------
@@ -179,39 +181,30 @@ class AlarmClient:
             try:
                 msg = decode(str(raw))
             except ValueError as exc:
-                self.log.warning("Bad message from server: %s", exc)
+                self.log.warning("Bad message: %s", exc)
                 continue
 
             if msg.type == MSG_ALARM:
-                self._handle_alarm(msg)  # type: ignore[arg-type]
+                self.log.info("ALARM received from room %r", msg.room)  # type: ignore[union-attr]
+                self._overlay.show_alarm(msg.room)  # type: ignore[union-attr]
+                self._sound.play()
             elif msg.type == MSG_CLIENT_DOWN:
-                self._handle_client_down(msg)  # type: ignore[arg-type]
+                self.log.warning("Client down: room %r", msg.room)  # type: ignore[union-attr]
+                self._overlay.show_banner(msg.room, up=False)  # type: ignore[union-attr]
             elif msg.type == MSG_CLIENT_UP:
-                self._handle_client_up(msg)  # type: ignore[arg-type]
-
-    def _handle_alarm(self, msg: AlarmMsg) -> None:
-        self.log.info("ALARM received for room %r", msg.room)
-        self._overlay.show_alarm(msg.room)
-        self._sound.play()
-
-    def _handle_client_down(self, msg: ClientDownMsg) -> None:
-        self.log.warning("Client down: room %r", msg.room)
-        self._overlay.show_banner(msg.room, up=False)
-
-    def _handle_client_up(self, msg: ClientUpMsg) -> None:
-        self.log.info("Client up: room %r", msg.room)
-        self._overlay.show_banner(msg.room, up=True)
+                self.log.info("Client up: room %r", msg.room)  # type: ignore[union-attr]
+                self._overlay.show_banner(msg.room, up=True)  # type: ignore[union-attr]
 
     # ------------------------------------------------------------------
     # Heartbeat loop
     # ------------------------------------------------------------------
 
     async def _heartbeat_loop(self, ws) -> None:
-        hb_msg = encode(HeartbeatMsg(room=self.cfg.room_name))
+        hb = encode(HeartbeatMsg(room=self.cfg.room_name))
         while True:
             await asyncio.sleep(5)
             try:
-                await ws.send(hb_msg)
+                await ws.send(hb)
             except ConnectionClosed:
                 break
 
@@ -220,28 +213,69 @@ class AlarmClient:
     # ------------------------------------------------------------------
 
     async def _alarm_send_loop(self, ws) -> None:
-        """Wait for the hotkey event and send an alarm message to the server."""
         alarm_msg = encode(AlarmMsg(room=self.cfg.room_name))
         while True:
-            await self._alarm_pending.wait()
-            self._alarm_pending.clear()
+            await self._alarm_pending.wait()  # type: ignore[union-attr]
+            self._alarm_pending.clear()  # type: ignore[union-attr]
             try:
                 await ws.send(alarm_msg)
-                self.log.info("Alarm sent to server for room %r", self.cfg.room_name)
+                self.log.info("Alarm sent for room %r", self.cfg.room_name)
             except ConnectionClosed:
-                # Will be handled by the reconnect loop; alarm will be re-sent
-                # once reconnected (the event is already cleared — this is
-                # acceptable; the operator can press the hotkey again).
                 break
 
     # ------------------------------------------------------------------
-    # Graceful shutdown
+    # Shutdown
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
         self._running = False
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+
+
+# ---------------------------------------------------------------------------
+# Top-level AlarmClient  (coordinates main thread + background thread)
+# ---------------------------------------------------------------------------
+
+class AlarmClient:
+    def __init__(self, cfg: ClientConfig, fallback_hotkey: bool = False) -> None:
+        self.cfg = cfg
+        self.log = _setup_logging(cfg.log_file)
+        self._overlay = OverlayManager()
+        self._sound = SoundPlayer(cfg.alarm_sound)
+        self._core = _AsyncCore(
+            cfg=cfg,
+            overlay=self._overlay,
+            sound=self._sound,
+            log=self.log,
+            fallback_hotkey=fallback_hotkey,
+        )
+
+    def run(self) -> None:
+        """
+        Start the asyncio core in a background thread, then run tkinter's
+        mainloop on the current (main) thread.  Blocks until stop() is called.
+        """
+        bg = threading.Thread(
+            target=self._core.run_in_thread,
+            daemon=True,
+            name="asyncio-core",
+        )
+        bg.start()
+
+        # Blocks the main thread — required on macOS
+        self._overlay.run_mainloop()
+
+        # mainloop returned → clean up
         self._sound.stop()
-        self._overlay.stop()
+        self._core.shutdown()
+        bg.join(timeout=3)
+
+    def stop(self) -> None:
+        """Signal both the overlay and the async core to shut down."""
+        self._sound.stop()
+        self._core.shutdown()
+        self._overlay.stop()   # posts _Stop → causes mainloop() to return
 
 
 # ---------------------------------------------------------------------------
@@ -252,17 +286,11 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Alarm System Client")
-    parser.add_argument("--config", default=None, help="Path to client_config.toml")
-    parser.add_argument(
-        "--fallback-hotkey",
-        action="store_true",
-        help="Use terminal-input fallback hotkey (type 'a'+Enter)",
-    )
-    parser.add_argument(
-        "--install",
-        action="store_true",
-        help="Register auto-start task and exit",
-    )
+    parser.add_argument("--config",          default=None,  help="Path to client_config.toml")
+    parser.add_argument("--fallback-hotkey", action="store_true",
+                        help="Use terminal-input fallback hotkey (type 'a'+Enter)")
+    parser.add_argument("--install",         action="store_true",
+                        help="Register auto-start task and exit")
     args = parser.parse_args()
 
     cfg = load_client_config(args.config)
@@ -273,38 +301,30 @@ def main() -> None:
 
     client = AlarmClient(cfg, fallback_hotkey=args.fallback_hotkey)
 
-    # Handle Ctrl+C gracefully
     def _sigint(_sig, _frame):
         print("\nShutting down…")
-        client.shutdown()
-        sys.exit(0)
+        client.stop()
 
     signal.signal(signal.SIGINT, _sigint)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _sigint)
 
-    asyncio.run(client.run())
+    client.run()
 
 
 def _install_autostart(cfg: ClientConfig) -> None:
     import subprocess
 
     scripts_dir = Path(__file__).parent.parent / "scripts"
-    exe = sys.executable
+    exe    = sys.executable
     target = Path(sys.argv[0]).resolve()
 
     if sys.platform == "win32":
         script = scripts_dir / "install_autostart_windows.py"
-        subprocess.run(
-            [exe, str(script), "--target", str(target), "--role", "client"],
-            check=True,
-        )
+        subprocess.run([exe, str(script), "--target", str(target), "--role", "client"], check=True)
     elif sys.platform == "darwin":
         script = scripts_dir / "install_autostart_mac.py"
-        subprocess.run(
-            [exe, str(script), "--target", str(target), "--role", "client"],
-            check=True,
-        )
+        subprocess.run([exe, str(script), "--target", str(target), "--role", "client"], check=True)
     else:
         print("Auto-start not supported on this platform. Configure manually.")
 
