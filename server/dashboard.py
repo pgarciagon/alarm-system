@@ -12,6 +12,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import List, Optional
 
+from common.autostart import is_autostart_enabled, set_autostart
 from common.config import ServerConfig
 from common.tray_icon import TrayIcon, set_window_icon
 from common.version import __version__
@@ -148,6 +149,26 @@ class ServerDashboard:
             ("Heartbeat-Timeout:", f"{self._cfg.heartbeat_timeout_sec}s"),
             ("Silent Alarm:", "Ja" if self._cfg.silent_alarm else "Nein"),
         ]
+
+        # Auto-start toggle row
+        autostart_row = tk.Frame(frame, bg=_HEADER_BG)
+        autostart_row.pack(fill=tk.X, pady=(5, 0))
+
+        tk.Label(
+            autostart_row, text="Autostart:", font=("Arial", 10),
+            fg="#aaaaaa", bg=_HEADER_BG,
+        ).pack(side=tk.LEFT)
+
+        self._autostart_enabled = is_autostart_enabled("server")
+        self._autostart_label = tk.Label(
+            autostart_row,
+            text=self._autostart_status_text(),
+            font=("Arial", 10, "bold"),
+            fg=_GREEN if self._autostart_enabled else "#888888",
+            bg=_HEADER_BG, cursor="hand2",
+        )
+        self._autostart_label.pack(side=tk.LEFT, padx=(3, 0))
+        self._autostart_label.bind("<Button-1>", lambda _: self._toggle_autostart())
         for col, (label, value) in enumerate(pairs):
             tk.Label(
                 info_frame, text=label, font=("Arial", 10),
@@ -420,6 +441,26 @@ class ServerDashboard:
             dlg, text="Übernehmen", bg=_GREEN, fg="white",
             command=_apply, font=("Arial", 10, "bold"), padx=15, pady=4,
         ).pack(pady=8)
+
+    # ------------------------------------------------------------------
+    # Auto-start toggle
+    # ------------------------------------------------------------------
+
+    def _autostart_status_text(self) -> str:
+        if self._autostart_enabled is None:
+            return "— (kein Task)"
+        return "Ein" if self._autostart_enabled else "Aus"
+
+    def _toggle_autostart(self) -> None:
+        if self._autostart_enabled is None:
+            return
+        new_state = not self._autostart_enabled
+        if set_autostart("server", "", new_state):
+            self._autostart_enabled = new_state
+            self._autostart_label.config(
+                text=self._autostart_status_text(),
+                fg=_GREEN if new_state else "#888888",
+            )
 
     # ------------------------------------------------------------------
     # Tray integration

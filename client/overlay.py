@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Optional
 
+from common.autostart import is_autostart_enabled, set_autostart
 from common.tray_icon import TrayIcon, set_window_icon
 from common.version import __version__
 
@@ -549,6 +550,18 @@ class OverlayManager:
         )
         self._mute_btn_canvas.pack(side="left", padx=(4, 0))
 
+        # Auto-start toggle
+        self._autostart_enabled = is_autostart_enabled("client", self._room_name)
+        self._autostart_canvas = _make_btn(
+            info_row,
+            text=self._autostart_btn_text(),
+            bg="#1a3a5c" if self._autostart_enabled else "#3a1a1a",
+            fg=self._ST_FG,
+            command=self._toggle_autostart,
+            font=("Arial", 8), padx=6, pady=1,
+        )
+        self._autostart_canvas.pack(side="left", padx=(4, 0))
+
         if self._hotkey:
             self._hotkey_label = tk.Label(
                 info_row, text=f"Tastenkürzel: {self._hotkey.upper()}",
@@ -633,6 +646,29 @@ class OverlayManager:
                 self._mute_btn_canvas.itemconfig("txt", text=label)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Auto-start toggle
+    # ------------------------------------------------------------------
+
+    def _autostart_btn_text(self) -> str:
+        if self._autostart_enabled is None:
+            return "Autostart: —"
+        return "Autostart: Ein" if self._autostart_enabled else "Autostart: Aus"
+
+    def _toggle_autostart(self) -> None:
+        if self._autostart_enabled is None:
+            return
+        new_state = not self._autostart_enabled
+        if set_autostart("client", self._room_name, new_state):
+            self._autostart_enabled = new_state
+            if self._autostart_canvas and self._autostart_canvas.winfo_exists():
+                bg = "#1a3a5c" if new_state else "#3a1a1a"
+                self._autostart_canvas.config(bg=bg)
+                try:
+                    self._autostart_canvas.itemconfig("txt", text=self._autostart_btn_text())
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Server scan dialog
