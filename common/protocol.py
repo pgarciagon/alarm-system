@@ -22,8 +22,9 @@ MSG_DISMISS       = "dismiss"
 MSG_CLIENT_DOWN   = "client_down"
 MSG_CLIENT_UP     = "client_up"
 MSG_CLIENT_LIST   = "client_list"
-MSG_REMOVE_CLIENT = "remove_client"
-MSG_SET_HOTKEY    = "set_hotkey"
+MSG_REMOVE_CLIENT  = "remove_client"
+MSG_SET_HOTKEY     = "set_hotkey"
+MSG_SET_ROOM_NAME  = "set_room_name"
 
 
 # ---------------------------------------------------------------------------
@@ -86,11 +87,18 @@ class SetHotkeyMsg:
     type: str = MSG_SET_HOTKEY
 
 
+@dataclass
+class SetRoomNameMsg:
+    room: str       # current name (identifies the target client)
+    new_name: str
+    type: str = MSG_SET_ROOM_NAME
+
+
 # ---------------------------------------------------------------------------
 # Serialisation helpers
 # ---------------------------------------------------------------------------
 
-AnyMsg = Union[RegisterMsg, AlarmMsg, HeartbeatMsg, DismissMsg, ClientDownMsg, ClientUpMsg, ClientListMsg, RemoveClientMsg, SetHotkeyMsg]
+AnyMsg = Union[RegisterMsg, AlarmMsg, HeartbeatMsg, DismissMsg, ClientDownMsg, ClientUpMsg, ClientListMsg, RemoveClientMsg, SetHotkeyMsg, SetRoomNameMsg]
 
 _TYPE_MAP: Dict[str, type] = {
     MSG_REGISTER:      RegisterMsg,
@@ -102,6 +110,7 @@ _TYPE_MAP: Dict[str, type] = {
     MSG_CLIENT_LIST:   ClientListMsg,
     MSG_REMOVE_CLIENT: RemoveClientMsg,
     MSG_SET_HOTKEY:    SetHotkeyMsg,
+    MSG_SET_ROOM_NAME: SetRoomNameMsg,
 }
 
 

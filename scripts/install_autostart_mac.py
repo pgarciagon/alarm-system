@@ -72,7 +72,7 @@ def _install(
         "Label": label,
         "ProgramArguments": program_args,
         "RunAtLoad": True,
-        "KeepAlive": True,
+        "KeepAlive": False,  # start at login but do NOT restart if user quits
         "WorkingDirectory": str(target.parent),
         "StandardOutPath": str(Path.home() / f"Library/Logs/{label}.log"),
         "StandardErrorPath": str(Path.home() / f"Library/Logs/{label}.err"),

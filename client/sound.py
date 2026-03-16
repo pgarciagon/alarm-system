@@ -57,6 +57,7 @@ class SoundPlayer:
     def __init__(self, sound_path: str = "") -> None:
         self._path: Optional[Path] = None
         self._playing = False
+        self._muted = False
         self._lock = threading.Lock()
         self._pygame_ok = False
         self._init_done = False
@@ -114,10 +115,22 @@ class SoundPlayer:
     # Public API
     # ------------------------------------------------------------------
 
-    def play(self) -> None:
-        """Start looped playback (non-blocking)."""
+    def set_muted(self, muted: bool) -> None:
+        """Mute or unmute. If muted while playing, stop sound immediately."""
         with self._lock:
-            if self._playing:
+            self._muted = muted
+        if muted:
+            self.stop()
+        log.info("Sound %s", "muted" if muted else "unmuted")
+
+    @property
+    def is_muted(self) -> bool:
+        return self._muted
+
+    def play(self) -> None:
+        """Start looped playback (non-blocking). No-op when muted."""
+        with self._lock:
+            if self._playing or self._muted:
                 return
             self._playing = True
         threading.Thread(target=self._play_worker, daemon=True).start()

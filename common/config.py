@@ -43,12 +43,16 @@ class ServerConfig:
     log_file: str = ""
 
 
+def _default_hotkey() -> str:
+    return "cmd+n" if sys.platform == "darwin" else "alt+n"
+
+
 @dataclass
 class ClientConfig:
     room_name: str = "Room 1"
     server_ip: str = "127.0.0.1"
     server_port: int = 9999
-    hotkey: str = "alt+n"
+    hotkey: str = field(default_factory=_default_hotkey)
 
     # path to custom alarm sound; empty string → use bundled asset
     alarm_sound: str = ""
@@ -77,7 +81,8 @@ _DEFAULT_CLIENT_TOML = """\
 room_name   = "Room 1"
 server_ip   = "127.0.0.1"
 server_port = 9999
-hotkey      = "alt+n"
+# macOS default: "cmd+n"  |  Windows/Linux default: "alt+n"
+hotkey      = "{hotkey}"
 alarm_sound = ""
 log_file    = ""
 """
@@ -128,9 +133,25 @@ def load_client_config(path: Optional[Union[str, Path]] = None) -> ClientConfig:
             return ClientConfig(**{k: v for k, v in section.items() if hasattr(ClientConfig, k)})
 
     default_path = Path.cwd() / "client_config.toml"
-    default_path.write_text(_DEFAULT_CLIENT_TOML, encoding="utf-8")
+    default_path.write_text(_DEFAULT_CLIENT_TOML.format(hotkey=_default_hotkey()), encoding="utf-8")
     print(f"[config] No client_config.toml found. Created default at {default_path}")
     return ClientConfig()
+
+
+def save_client_config(cfg: ClientConfig, path: Optional[Union[str, Path]] = None) -> None:
+    """Persist *cfg* back to client_config.toml (overwrites the file)."""
+    candidates = _resolve_candidates(path, "client_config.toml")
+    target = next((p for p in candidates if p.exists()), candidates[-1])
+    content = (
+        "[client]\n"
+        f'room_name   = "{cfg.room_name}"\n'
+        f'server_ip   = "{cfg.server_ip}"\n'
+        f"server_port = {cfg.server_port}\n"
+        f'hotkey      = "{cfg.hotkey}"\n'
+        f'alarm_sound = "{cfg.alarm_sound}"\n'
+        f'log_file    = "{cfg.log_file}"\n'
+    )
+    target.write_text(content, encoding="utf-8")
 
 
 def _resolve_candidates(path: Optional[Union[str, Path]], filename: str) -> List[Path]:

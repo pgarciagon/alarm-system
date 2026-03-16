@@ -38,7 +38,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from common.config import ClientConfig, load_client_config
+from common.config import ClientConfig, load_client_config, save_client_config
 from common.protocol import (
     AlarmMsg,
     ClientDownMsg,
@@ -46,6 +46,7 @@ from common.protocol import (
     HeartbeatMsg,
     RegisterMsg,
     SetHotkeyMsg,
+    SetRoomNameMsg,
     decode,
     encode,
     MSG_ALARM,
@@ -53,6 +54,7 @@ from common.protocol import (
     MSG_CLIENT_LIST,
     MSG_CLIENT_UP,
     MSG_SET_HOTKEY,
+    MSG_SET_ROOM_NAME,
 )
 from client.hotkey import make_hotkey_listener
 from client.overlay import OverlayManager
@@ -117,7 +119,23 @@ class _AsyncCore:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._main())
+        except RuntimeError as exc:
+            # "Event loop stopped before Future completed" is expected when
+            # shutdown() calls loop.stop() while coroutines are still pending.
+            if "Event loop stopped before Future completed" not in str(exc):
+                self.log.exception("Unexpected asyncio error: %s", exc)
         finally:
+            # Cancel any remaining tasks so the loop closes cleanly
+            try:
+                pending = asyncio.all_tasks(self._loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    self._loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception:
+                pass
             self._loop.close()
 
     async def _main(self) -> None:
@@ -150,6 +168,7 @@ class _AsyncCore:
         )
         self._hotkey_listener.start()
         self.log.info("Hotkey changed to %s", new_hotkey)
+        save_client_config(self.cfg)
 
     def _on_hotkey_pressed(self) -> None:
         self.log.info("Hotkey pressed — queuing alarm for room %r", self.cfg.room_name)
@@ -161,14 +180,21 @@ class _AsyncCore:
     # ------------------------------------------------------------------
 
     async def _connect_loop(self) -> None:
-        uri = f"ws://{self.cfg.server_ip}:{self.cfg.server_port}"
         attempt = 0
+        self._reconnect_event = asyncio.Event()
 
         while self._running:
+            # Re-read server address each iteration so reconnect_to() takes effect
+            uri = f"ws://{self.cfg.server_ip}:{self.cfg.server_port}"
             delay = self._BACKOFF[min(attempt, len(self._BACKOFF) - 1)]
             if attempt > 0:
                 self.log.info("Reconnecting in %ds (attempt %d)…", delay, attempt)
-                await asyncio.sleep(delay)
+                try:
+                    await asyncio.wait_for(self._reconnect_event.wait(), timeout=delay)
+                    self.log.info("Reconnect forced by user")
+                except asyncio.TimeoutError:
+                    pass
+            self._reconnect_event.clear()
 
             try:
                 self.log.info("Connecting to %s…", uri)
@@ -195,6 +221,14 @@ class _AsyncCore:
                 break
             finally:
                 attempt += 1
+
+    def reconnect_to(self, new_ip: str) -> None:
+        """Switch server IP and force an immediate reconnect (thread-safe)."""
+        self.cfg.server_ip = new_ip
+        save_client_config(self.cfg)
+        self.log.info("Server changed to %s — forcing reconnect", new_ip)
+        if self._loop and self._loop.is_running() and hasattr(self, "_reconnect_event"):
+            self._loop.call_soon_threadsafe(self._reconnect_event.set)
 
     # ------------------------------------------------------------------
     # Receive loop
@@ -224,8 +258,17 @@ class _AsyncCore:
                 new_hotkey = msg.hotkey  # type: ignore[union-attr]
                 self.log.info("Hotkey changed to %r by server", new_hotkey)
                 self.cfg.hotkey = new_hotkey
+                save_client_config(self.cfg)
                 self._overlay.update_hotkey(new_hotkey)
                 self._restart_hotkey(new_hotkey)
+            elif msg.type == MSG_SET_ROOM_NAME:
+                new_name = msg.new_name  # type: ignore[union-attr]
+                self.log.info("Room name changed to %r by server", new_name)
+                self.cfg.room_name = new_name
+                save_client_config(self.cfg)
+                self._overlay.update_room_name(new_name)
+                # Re-register under the new name
+                await ws.send(encode(RegisterMsg(room=new_name, hotkey=self.cfg.hotkey)))
 
     # ------------------------------------------------------------------
     # Heartbeat loop
@@ -262,7 +305,12 @@ class _AsyncCore:
     def shutdown(self) -> None:
         self._running = False
         if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            # Cancel all running tasks, then stop the loop
+            def _cancel_and_stop():
+                for task in asyncio.all_tasks(self._loop):
+                    task.cancel()
+                self._loop.stop()
+            self._loop.call_soon_threadsafe(_cancel_and_stop)
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +331,9 @@ class AlarmClient:
             stop_client_cb=self.stop,
             hotkey=cfg.hotkey,
             change_hotkey_cb=self._on_hotkey_changed,
+            change_room_name_cb=self._on_room_name_changed,
+            reconnect_cb=self._on_server_changed,
+            toggle_mute_cb=self._on_toggle_mute,
         )
         self._core = _AsyncCore(
             cfg=cfg,
@@ -315,6 +366,21 @@ class AlarmClient:
     def _on_hotkey_changed(self, new_hotkey: str) -> None:
         """Called from GUI when user edits hotkey locally."""
         self._core._restart_hotkey(new_hotkey)
+
+    def _on_room_name_changed(self, new_name: str) -> None:
+        """Called from GUI when user edits room name locally."""
+        self._core.cfg.room_name = new_name
+        save_client_config(self._core.cfg)
+        # The new name takes effect on the next server reconnect (RegisterMsg)
+
+    def _on_server_changed(self, new_ip: str) -> None:
+        """Called from GUI after user picks a server from the scan dialog."""
+        self._overlay.update_server_info(f"{new_ip}:{self.cfg.server_port}")
+        self._core.reconnect_to(new_ip)
+
+    def _on_toggle_mute(self, muted: bool) -> None:
+        """Called from GUI when user toggles silent mode."""
+        self._sound.set_muted(muted)
 
     def stop(self) -> None:
         """Signal both the overlay and the async core to shut down."""

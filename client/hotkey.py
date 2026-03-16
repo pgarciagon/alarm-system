@@ -89,6 +89,94 @@ class HotkeyListener:
             log.error("Hotkey callback raised: %s", exc)
 
 
+class MacHotkeyListener:
+    """
+    macOS hotkey listener using pynput.keyboard.Listener (CGEventTap in a
+    background thread).  Avoids GlobalHotKeys which starts its own NSRunLoop
+    and crashes when tkinter already owns the main thread.
+    """
+
+    # Map user-facing modifier names → pynput Key sets
+    _MOD_NAMES = ("cmd", "ctrl", "alt", "option", "shift")
+
+    def __init__(self, hotkey: str, callback: Callable[[], None]) -> None:
+        self._hotkey = hotkey.lower()
+        self._callback = callback
+        self._listener = None
+        self._pressed: set = set()
+        self._target_mods: frozenset = frozenset()
+        self._target_key: str = ""
+        self._parse_hotkey()
+
+    def _parse_hotkey(self) -> None:
+        parts = self._hotkey.split("+")
+        mods = [p for p in parts[:-1] if p in self._MOD_NAMES]
+        # normalise "option" → "alt"
+        mods = ["alt" if m == "option" else m for m in mods]
+        self._target_mods = frozenset(mods)
+        self._target_key = parts[-1]
+
+    def _mod_name(self, key) -> str | None:
+        try:
+            from pynput.keyboard import Key
+            if key in (Key.cmd, Key.cmd_l, Key.cmd_r):     return "cmd"
+            if key in (Key.ctrl, Key.ctrl_l, Key.ctrl_r):  return "ctrl"
+            if key in (Key.alt, Key.alt_l, Key.alt_r):     return "alt"
+            if key in (Key.shift, Key.shift_l, Key.shift_r): return "shift"
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _key_name(self, key) -> str | None:
+        try:
+            from pynput.keyboard import KeyCode
+            if isinstance(key, KeyCode) and key.char:
+                return key.char.lower()
+            return key.name.lower()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _on_press(self, key) -> None:
+        mod = self._mod_name(key)
+        if mod:
+            self._pressed.add(mod)
+        else:
+            if self._pressed == self._target_mods:
+                if self._key_name(key) == self._target_key:
+                    try:
+                        self._callback()
+                    except Exception as exc:  # noqa: BLE001
+                        log.error("Hotkey callback raised: %s", exc)
+
+    def _on_release(self, key) -> None:
+        mod = self._mod_name(key)
+        if mod:
+            self._pressed.discard(mod)
+
+    def start(self) -> None:
+        try:
+            from pynput.keyboard import Listener
+            self._listener = Listener(
+                on_press=self._on_press,
+                on_release=self._on_release,
+            )
+            self._listener.start()
+            log.info("macOS hotkey registered via pynput Listener: %s", self._hotkey)
+        except ImportError:
+            log.error("pynput is not installed. Run: pip install pynput")
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failed to register macOS hotkey %r: %s", self._hotkey, exc)
+
+    def stop(self) -> None:
+        if self._listener is not None:
+            try:
+                self._listener.stop()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Error stopping pynput listener: %s", exc)
+            self._listener = None
+            log.info("macOS hotkey unregistered: %s", self._hotkey)
+
+
 class _FallbackHotkeyListener:
     """
     Terminal-based fallback used during macOS simulation when the `keyboard`
@@ -146,14 +234,16 @@ def make_hotkey_listener(
     hotkey: str,
     callback: Callable[[], None],
     fallback: bool = False,
-) -> HotkeyListener | _FallbackHotkeyListener:
+) -> "HotkeyListener | MacHotkeyListener | _FallbackHotkeyListener":
     """
     Factory that returns the best available hotkey listener.
 
-    If *fallback* is True, a terminal-based listener is returned.
-    Otherwise a system-wide ``HotkeyListener`` is returned.
+    - On macOS: uses ``MacHotkeyListener`` (pynput-based, no root required).
+    - On other platforms: uses ``HotkeyListener`` (keyboard-library-based).
+    - If *fallback* is True: terminal stdin listener (for testing/no-permissions).
     """
     if fallback:
-        # Use 'a' as the fallback trigger; ignore the actual hotkey string
         return _FallbackHotkeyListener(callback)
+    if sys.platform == "darwin":
+        return MacHotkeyListener(hotkey, callback)
     return HotkeyListener(hotkey, callback)

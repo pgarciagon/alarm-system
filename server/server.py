@@ -42,6 +42,7 @@ from common.protocol import (
     RegisterMsg,
     RemoveClientMsg,
     SetHotkeyMsg,
+    SetRoomNameMsg,
     decode,
     encode,
     MSG_ALARM,
@@ -50,6 +51,7 @@ from common.protocol import (
     MSG_DISMISS,
     MSG_REMOVE_CLIENT,
     MSG_SET_HOTKEY,
+    MSG_SET_ROOM_NAME,
 )
 
 
@@ -172,6 +174,14 @@ class AlarmServer:
                 lambda: asyncio.ensure_future(self._on_set_hotkey(msg))
             )
 
+    def set_client_room_name(self, room: str, new_name: str) -> None:
+        """Rename a client's room (thread-safe, called from GUI)."""
+        if self._loop and self._loop.is_running():
+            msg = SetRoomNameMsg(room=room, new_name=new_name)
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._on_set_room_name(msg))
+            )
+
     # ------------------------------------------------------------------
     # Per-connection handler
     # ------------------------------------------------------------------
@@ -283,6 +293,19 @@ class AlarmServer:
                     except Exception:
                         pass
                 self.log.info("Hotkey for room %r set to %r", msg.room, msg.hotkey)
+                await self._broadcast_client_list()
+
+    async def _on_set_room_name(self, msg: SetRoomNameMsg) -> None:
+        async with self._lock:
+            entry = self._clients.pop(msg.room, None)
+            if entry:
+                self._clients[msg.new_name] = entry
+                if not entry.is_down:
+                    try:
+                        await entry.ws.send(encode(SetRoomNameMsg(room=msg.room, new_name=msg.new_name)))
+                    except Exception:
+                        pass
+                self.log.info("Room %r renamed to %r", msg.room, msg.new_name)
                 await self._broadcast_client_list()
 
     async def _on_disconnect(self, room: str) -> None:

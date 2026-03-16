@@ -14,6 +14,7 @@ from typing import List, Optional
 
 from common.config import ServerConfig
 from common.tray_icon import TrayIcon, set_window_icon
+from common.version import __version__
 
 # Avoid circular import at module level — AlarmServer is only used for typing.
 from typing import TYPE_CHECKING
@@ -33,6 +34,29 @@ _GREEN = "#00b894"
 _AMBER = "#fdcb6e"
 _RED = "#e94560"
 _HEADER_BG = "#16213e"
+
+
+def _darken(hex_color: str) -> str:
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    r, g, b = max(0, r - 25), max(0, g - 25), max(0, b - 25)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _make_btn(parent, text, bg, fg, command, font=("Arial", 9), padx=10, pady=2):
+    """Canvas-based button — tk.Canvas always honours bg/fg on macOS Aqua theme."""
+    _probe = tk.Label(parent, text=text, font=font)
+    _probe.update_idletasks()
+    tw, th = _probe.winfo_reqwidth(), _probe.winfo_reqheight()
+    _probe.destroy()
+    w, h = tw + padx * 2, th + pady * 2
+    canvas = tk.Canvas(parent, bg=bg, width=w, height=h,
+                       highlightthickness=0, bd=0, cursor="hand2")
+    canvas.create_text(w // 2, h // 2, text=text, font=font, fill=fg, tags="txt")
+    canvas.bind("<Button-1>", lambda _e: command())
+    canvas.bind("<Enter>",    lambda _e: canvas.config(bg=_darken(bg)))
+    canvas.bind("<Leave>",    lambda _e: canvas.config(bg=bg))
+    return canvas
 
 
 class ServerDashboard:
@@ -56,7 +80,7 @@ class ServerDashboard:
     def run_mainloop(self) -> None:
         """Build the UI and enter the tkinter main loop (blocks)."""
         self._root = tk.Tk()
-        self._root.title("Alarm Server — Dashboard")
+        self._root.title(f"Alarm Server — Dashboard  v{__version__}")
         set_window_icon(self._root, "alarm_server.ico")
         self._root.configure(bg=_BG)
         self._root.geometry("700x460")
@@ -100,17 +124,19 @@ class ServerDashboard:
             title_row, text="Server-Konfiguration", font=("Arial", 14, "bold"),
             fg=_ACCENT, bg=_HEADER_BG, anchor="w",
         ).pack(side=tk.LEFT)
+        tk.Label(
+            title_row, text=f"v{__version__}", font=("Arial", 9),
+            fg="#555555", bg=_HEADER_BG, anchor="w",
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
-        tk.Button(
-            title_row, text="Beenden", font=("Arial", 9),
-            bg=_RED, fg="white", relief="flat", padx=10, pady=2,
-            cursor="hand2", command=self._exit,
+        _make_btn(
+            title_row, text="Beenden", bg=_RED, fg="white",
+            command=self._exit,
         ).pack(side=tk.RIGHT, padx=(4, 0))
 
-        tk.Button(
-            title_row, text="Ausblenden", font=("Arial", 9),
-            bg=_BLUE, fg=_FG, relief="flat", padx=10, pady=2,
-            cursor="hand2", command=self._minimize_to_tray,
+        _make_btn(
+            title_row, text="Ausblenden", bg=_BLUE, fg=_FG,
+            command=self._minimize_to_tray,
         ).pack(side=tk.RIGHT)
 
         info_frame = tk.Frame(frame, bg=_HEADER_BG)
@@ -215,11 +241,13 @@ class ServerDashboard:
                 row = tk.Frame(self._client_frame, bg=row_bg, padx=10, pady=4)
                 row.pack(fill=tk.X)
 
-                # Room name
-                tk.Label(
+                # Room name (clickable to rename)
+                room_lbl = tk.Label(
                     row, text=snap.room, font=("Arial", 10),
-                    fg=_FG, bg=row_bg, anchor="w", width=14,
-                ).grid(row=0, column=0, sticky="w")
+                    fg=_FG, bg=row_bg, anchor="w", width=14, cursor="hand2",
+                )
+                room_lbl.grid(row=0, column=0, sticky="w")
+                room_lbl.bind("<Button-1>", lambda _e, r=snap.room: self._edit_room_name(r))
 
                 # Status indicator
                 if snap.is_down:
@@ -260,11 +288,10 @@ class ServerDashboard:
                 ).grid(row=0, column=3, sticky="w")
 
                 # Remove button
-                tk.Button(
-                    row, text="\u2716", font=("Arial", 9),
-                    bg=row_bg, fg=_RED, relief="flat",
-                    cursor="hand2", width=3,
+                _make_btn(
+                    row, text="\u2716", bg=row_bg, fg=_RED,
                     command=lambda r=snap.room: self._remove_client(r),
+                    padx=6, pady=2,
                 ).grid(row=0, column=4, sticky="e")
 
                 self._client_widgets.append(row)
@@ -298,35 +325,101 @@ class ServerDashboard:
         dlg = tk.Toplevel(self._root)
         dlg.title(f"Hotkey — {room}")
         dlg.configure(bg=_BG)
-        dlg.geometry("300x120")
+        dlg.geometry("320x160")
         dlg.resizable(False, False)
         dlg.attributes("-topmost", True)
         dlg.transient(self._root)
         dlg.grab_set()
 
         tk.Label(
-            dlg, text=f"Hotkey für {room}:", font=("Arial", 10),
+            dlg, text=f"Drücke Kombination für {room}:", font=("Arial", 10),
             bg=_BG, fg=_FG,
         ).pack(pady=(15, 5))
 
-        var = tk.StringVar(value=current_hotkey)
-        entry = tk.Entry(dlg, textvariable=var, font=("Arial", 11), width=18, justify="center")
-        entry.pack()
-        entry.select_range(0, tk.END)
-        entry.focus_set()
+        captured = {"combo": current_hotkey}
+
+        cap_canvas = tk.Canvas(dlg, bg="#1a1a2e", width=260, height=32,
+                               highlightthickness=1, highlightbackground="#00cec9", bd=0)
+        cap_canvas.pack(padx=20)
+        cap_text = cap_canvas.create_text(130, 16, text=current_hotkey,
+                                          font=("Arial", 12, "bold"), fill="#00cec9")
+
+        _MODIFIER_KEYSYMS = {
+            "control_l", "control_r", "alt_l", "alt_r", "shift_l", "shift_r",
+            "meta_l", "meta_r", "super_l", "super_r", "caps_lock",
+        }
+
+        def _on_key(event):
+            parts = []
+            state = event.state
+            if state & 0x4:  parts.append("ctrl")
+            if state & 0x8:  parts.append("alt")
+            if state & 0x80: parts.append("cmd")
+            if state & 0x1:  parts.append("shift")
+            key = event.keysym.lower()
+            if key not in _MODIFIER_KEYSYMS:
+                parts.append(key)
+            if len(parts) >= 2:
+                combo = "+".join(parts)
+                captured["combo"] = combo
+                cap_canvas.itemconfig(cap_text, text=combo)
+            if event.keysym == "Return":
+                _apply()
+
+        dlg.bind("<KeyPress>", _on_key)
+        dlg.focus_set()
+
+        tk.Label(
+            dlg, text="(Die Kombination einfach drücken — kein Klick nötig)",
+            font=("Arial", 8), bg=_BG, fg="#888888",
+        ).pack()
 
         def _apply():
-            new_hk = var.get().strip()
+            new_hk = captured["combo"].strip()
             if new_hk:
                 self._server.set_client_hotkey(room, new_hk)
             dlg.destroy()
 
+        _make_btn(
+            dlg, text="Übernehmen", bg=_GREEN, fg="white",
+            command=_apply, font=("Arial", 10, "bold"), padx=15, pady=4,
+        ).pack(pady=8)
+
+    def _edit_room_name(self, room: str) -> None:
+        """Open a dialog to rename a client's room."""
+        if not self._root:
+            return
+        dlg = tk.Toplevel(self._root)
+        dlg.title(f"Umbenennen — {room}")
+        dlg.configure(bg=_BG)
+        dlg.geometry("300x130")
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.transient(self._root)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg, text=f"Neuer Name für {room}:", font=("Arial", 10),
+            bg=_BG, fg=_FG,
+        ).pack(pady=(15, 5))
+
+        var = tk.StringVar(value=room)
+        entry = tk.Entry(dlg, textvariable=var, font=("Arial", 11), width=20, justify="center")
+        entry.pack(padx=20)
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        def _apply():
+            new_name = var.get().strip()
+            if new_name and new_name != room:
+                self._server.set_client_room_name(room, new_name)
+            dlg.destroy()
+
         entry.bind("<Return>", lambda _: _apply())
-        tk.Button(
-            dlg, text="Übernehmen", font=("Arial", 10, "bold"),
-            bg=_GREEN, fg="white", relief="flat", padx=15, pady=4,
-            cursor="hand2", command=_apply,
-        ).pack(pady=10)
+        _make_btn(
+            dlg, text="Übernehmen", bg=_GREEN, fg="white",
+            command=_apply, font=("Arial", 10, "bold"), padx=15, pady=4,
+        ).pack(pady=8)
 
     # ------------------------------------------------------------------
     # Tray integration
