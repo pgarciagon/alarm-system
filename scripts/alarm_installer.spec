@@ -19,7 +19,7 @@ from pathlib import Path
 
 REPO = Path(SPECPATH).parent  # repo root (one level up from scripts/)
 
-a_installer = Analysis(
+a = Analysis(
     [str(REPO / 'scripts' / 'installer.py')],
     pathex=[str(REPO)],
     binaries=[],
@@ -34,16 +34,10 @@ a_installer = Analysis(
         (str(REPO / 'config' / 'client_config.toml'), 'config'),
     ],
     hiddenimports=[
-        # Server dependencies
+        # Server
         'server.server',
-        'websockets',
-        'websockets.server',
-        'websockets.connection',
-        'websockets.exceptions',
-        'websockets.frames',
-        'websockets.http11',
-        'websockets.streams',
-        # Client dependencies
+        'server.dashboard',
+        # Client
         'client.client',
         'client.overlay',
         'client.sound',
@@ -52,9 +46,27 @@ a_installer = Analysis(
         'common.config',
         'common.protocol',
         'common.tray_icon',
+        # WebSocket
+        'websockets',
+        'websockets.asyncio',
+        'websockets.asyncio.server',
+        'websockets.asyncio.client',
+        'websockets.server',
+        'websockets.client',
+        'websockets.connection',
+        'websockets.exceptions',
+        'websockets.frames',
+        'websockets.http11',
+        'websockets.streams',
+        'websockets.legacy',
+        'websockets.legacy.server',
+        'websockets.legacy.client',
         # System tray
         'pystray',
+        'pystray._win32',
         'PIL',
+        'PIL.Image',
+        'PIL.ImageDraw',
         # stdlib / backport
         'tomllib',
         'tomli',
@@ -63,7 +75,7 @@ a_installer = Analysis(
         'pygame.mixer',
         # Hotkey
         'keyboard',
-        # tkinter (usually auto-detected but list explicitly)
+        # tkinter
         'tkinter',
         'tkinter.ttk',
         'tkinter.messagebox',
@@ -79,56 +91,13 @@ a_installer = Analysis(
     noarchive=False,
 )
 
-# Also analyse server and client so their code + imports are included
-a_server = Analysis(
-    [str(REPO / 'server' / 'server.py')],
-    pathex=[str(REPO)],
-    binaries=[],
-    datas=[],
-    hiddenimports=['websockets', 'websockets.server', 'common.config', 'common.protocol',
-                   'common.tray_icon', 'pystray', 'PIL',
-                   'server.dashboard', 'server.tray_icon',
-                   'tomllib', 'tomli'],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
-    noarchive=False,
-)
-
-a_client = Analysis(
-    [str(REPO / 'client' / 'client.py')],
-    pathex=[str(REPO)],
-    binaries=[],
-    datas=[
-        (str(REPO / 'assets' / 'alarm.wav'), 'assets'),
-    ],
-    hiddenimports=['client.overlay', 'client.sound', 'client.hotkey',
-                   'common.config', 'common.protocol', 'common.tray_icon',
-                   'pystray', 'PIL',
-                   'websockets', 'pygame', 'pygame.mixer', 'keyboard',
-                   'tkinter', 'tkinter.ttk', 'tomllib', 'tomli'],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
-    noarchive=False,
-)
-
-# Merge all three analyses into one bundle
-MERGE(
-    (a_installer, 'installer',    'installer'),
-    (a_server,    'server',       'server/server'),
-    (a_client,    'client',       'client/client'),
-)
-
-pyz = PYZ(a_installer.pure)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
-    a_installer.scripts,
-    a_installer.binaries,
-    a_installer.datas,
+    a.scripts,
+    a.binaries,
+    a.datas,
     [],
     name='alarm_installer',
     debug=False,
