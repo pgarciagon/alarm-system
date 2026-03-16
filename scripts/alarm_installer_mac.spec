@@ -29,6 +29,11 @@ a = Analysis(
         # Default configs
         (str(REPO / 'config' / 'server_config.toml'), 'config'),
         (str(REPO / 'config' / 'client_config.toml'), 'config'),
+        # Python source packages — copied to install dir at install time
+        # so the system Python can run them without a bundled interpreter
+        (str(REPO / 'server'),  'server'),
+        (str(REPO / 'client'),  'client'),
+        (str(REPO / 'common'),  'common'),
     ],
     hiddenimports=[
         # Server

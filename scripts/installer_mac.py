@@ -39,13 +39,24 @@ if getattr(sys, "frozen", False):
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_NAME     = "AlarmSystem"
-INSTALL_DIR  = Path("/Applications") / APP_NAME
+APP_NAME      = "AlarmSystem"
+INSTALL_DIR   = Path("/Applications") / APP_NAME
 LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
-LABEL_SERVER = "com.alarm-system.server"
-LABEL_CLIENT = "com.alarm-system.client"
-DEFAULT_PORT = 9999
+LABEL_SERVER  = "com.alarm-system.server"
+LABEL_CLIENT  = "com.alarm-system.client"
+DEFAULT_PORT  = 9999
 PROBE_TIMEOUT = 2.0
+
+REQUIREMENTS = [
+    "websockets>=12.0",
+    "keyboard>=0.13.5",
+    "pygame>=2.5.0",
+    "pystray>=0.19.5",
+    "Pillow>=10.0.0",
+]
+
+# Source packages to copy into the install dir (relative to repo root)
+SOURCE_PACKAGES = ["server", "client", "common", "config", "assets"]
 
 
 # ---------------------------------------------------------------------------
@@ -155,40 +166,103 @@ def write_client_config(path: Path, room: str, server_ip: str,
 # Asset / exe helpers
 # ---------------------------------------------------------------------------
 
-def _bundle_file(rel: str) -> Optional[Path]:
+def _bundle_path() -> Path:
+    """Root of bundled data: _MEIPASS when frozen, repo root when dev."""
     if getattr(sys, "frozen", False):
-        p = Path(sys._MEIPASS) / rel  # type: ignore[attr-defined]
-    else:
-        p = Path(__file__).parent.parent / rel
+        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    return Path(__file__).parent.parent
+
+
+def _bundle_file(rel: str) -> Optional[Path]:
+    p = _bundle_path() / rel
     return p if p.exists() else None
 
 
-def _copy_app(role: str, dest: Path) -> Path:
-    """Copy the appropriate binary to dest. Returns the path to launch."""
-    dest.mkdir(parents=True, exist_ok=True)
+def _find_python3() -> str:
+    """Return the best available python3 executable path."""
+    candidates = [
+        "/opt/homebrew/opt/python@3.12/bin/python3.12",
+        "/opt/homebrew/opt/python@3.13/bin/python3.13",
+        "/opt/homebrew/opt/python@3.11/bin/python3.11",
+        "/opt/homebrew/bin/python3.12",
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3.12",
+        "/usr/local/bin/python3",
+        "/usr/bin/python3",
+        sys.executable,
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return sys.executable
+
+
+def _pip_install(python: str, log_cb) -> None:
+    """pip-install all required packages into the system Python."""
+    log_cb("Abhängigkeiten werden installiert…")
+    cmd = [python, "-m", "pip", "install", "--break-system-packages", "--quiet"]
+    cmd += REQUIREMENTS
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        # Try without --break-system-packages (older pip / venv)
+        cmd2 = [python, "-m", "pip", "install", "--quiet"] + REQUIREMENTS
+        r2 = subprocess.run(cmd2, capture_output=True, text=True)
+        if r2.returncode != 0:
+            raise RuntimeError(
+                f"pip install fehlgeschlagen:\n{r.stderr or r2.stderr}"
+            )
+
+
+def _copy_sources(dest: Path) -> None:
+    """Copy Python source packages (server/, client/, common/, etc.) to dest."""
+    bundle = _bundle_path()
+    for pkg in SOURCE_PACKAGES:
+        src = bundle / pkg
+        dst = dest / pkg
+        if src.exists():
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+
+
+def _write_launcher(dest: Path, role: str, python: str, config_path: Path) -> Path:
+    """Write a shell launcher script and return its path."""
+    module = "server.server" if role == "server" else "client.client"
     exe_name = "alarm_server" if role == "server" else "alarm_client"
-    target = dest / exe_name
+    launcher = dest / exe_name
+    launcher.write_text(
+        "#!/bin/bash\n"
+        f'cd "{dest}"\n'
+        f'"{python}" -m {module} --config "{config_path}" "$@"\n',
+        encoding="utf-8",
+    )
+    os.chmod(launcher, 0o755)
+    return launcher
 
-    if getattr(sys, "frozen", False):
-        # Frozen: copy ourselves, rename to role-specific name
-        try:
-            shutil.copy2(sys.executable, target)
-            os.chmod(target, 0o755)
-        except PermissionError:
-            pass  # already in place
-    else:
-        # Unfrozen (dev): write a shell launcher
-        module = "server.server" if role == "server" else "client.client"
-        repo_root = Path(__file__).parent.parent.resolve()
-        python = sys.executable
-        target = dest / f"{exe_name}.sh"
-        target.write_text(
-            f"#!/bin/bash\ncd \"{repo_root}\"\n\"{python}\" -m {module} \"$@\"\n",
-            encoding="utf-8",
-        )
-        os.chmod(target, 0o755)
 
-    # Copy bundled assets
+def _install_app(role: str, dest: Path, log_cb, python: Optional[str] = None) -> Path:
+    """
+    Full install:
+      1. Create dest dir
+      2. pip-install dependencies into system Python
+      3. Copy source packages into dest
+      4. Copy assets into dest/assets/
+      5. Write shell launcher
+    Returns path to the launcher script.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+
+    if python is None:
+        python = _find_python3()
+
+    # 1. pip dependencies
+    _pip_install(python, log_cb)
+
+    # 2. Copy source packages
+    log_cb("Quelldateien werden kopiert…")
+    _copy_sources(dest)
+
+    # 3. Copy assets
     assets_dest = dest / "assets"
     assets_dest.mkdir(exist_ok=True)
     for name in ["alarm.wav", "alarm.ico", "alarm_server.ico", "alarm_client.ico"]:
@@ -196,10 +270,16 @@ def _copy_app(role: str, dest: Path) -> Path:
         if src:
             try:
                 shutil.copy2(src, assets_dest / name)
-            except PermissionError:
+            except Exception:
                 pass
 
-    return target
+    # 4. Write launcher
+    config_path = dest / (
+        "server_config.toml" if role == "server" else "client_config.toml"
+    )
+    launcher = _write_launcher(dest, role, python, config_path)
+    log_cb(f"Launcher geschrieben: {launcher}")
+    return launcher
 
 
 # ---------------------------------------------------------------------------
@@ -467,9 +547,11 @@ class InstallerApp(tk.Tk):
             messagebox.showerror("Fehler", "Ungültiger Port.")
             return
         self._show_progress("Server wird installiert…")
+        def _log(msg: str):
+            self.after(0, lambda m=msg: self._update_progress(m))
         def _worker():
             try:
-                exe = _copy_app("server", INSTALL_DIR)
+                exe = _install_app("server", INSTALL_DIR, _log)
                 cfg = INSTALL_DIR / "server_config.toml"
                 write_server_config(cfg, port, self._silent_var.get())
                 ok = register_launchd(exe, "server", cfg)
@@ -494,9 +576,11 @@ class InstallerApp(tk.Tk):
             messagebox.showerror("Fehler", "Bitte Server-IP eingeben.")
             return
         self._show_progress("Client wird installiert…")
+        def _log(msg: str):
+            self.after(0, lambda m=msg: self._update_progress(m))
         def _worker():
             try:
-                exe = _copy_app("client", INSTALL_DIR)
+                exe = _install_app("client", INSTALL_DIR, _log)
                 cfg = INSTALL_DIR / "client_config.toml"
                 write_client_config(cfg, room, sip, port, hotkey)
                 ok = register_launchd(exe, "client", cfg)
@@ -508,10 +592,18 @@ class InstallerApp(tk.Tk):
     def _show_progress(self, msg: str) -> None:
         self._clear()
         tk.Label(self, text=msg, font=("Arial", 14),
-                 bg=self._BG, fg=self._FG).pack(pady=60)
+                 bg=self._BG, fg=self._FG).pack(pady=(60, 10))
         bar = ttk.Progressbar(self, mode="indeterminate", length=300)
         bar.pack()
         bar.start(10)
+        self._progress_detail = tk.Label(
+            self, text="", font=("Arial", 10),
+            bg=self._BG, fg=self._AMBER, wraplength=500)
+        self._progress_detail.pack(pady=(12, 0))
+
+    def _update_progress(self, msg: str) -> None:
+        if hasattr(self, "_progress_detail"):
+            self._progress_detail.config(text=msg)
 
     def _finish(self, launchd_ok: bool, role: str, exe: Path) -> None:
         self._clear()
