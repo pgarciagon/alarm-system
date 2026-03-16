@@ -233,6 +233,17 @@ class AlarmServer:
         room = msg.room
         hotkey = getattr(msg, 'hotkey', '') or ''
         async with self._lock:
+            # Check if this websocket was previously registered under a different name
+            old_room = None
+            for r, entry in self._clients.items():
+                if entry.ws is ws and r != room:
+                    old_room = r
+                    break
+            if old_room:
+                self._clients.pop(old_room)
+                self.log.info("Room %r renamed to %r", old_room, room)
+                await self._broadcast(ClientDownMsg(room=old_room), exclude=room)
+
             existing = self._clients.get(room)
             if existing and existing.is_down:
                 # Room reconnecting after being marked down
@@ -242,6 +253,11 @@ class AlarmServer:
                 existing.hotkey = hotkey
                 self.log.info("Room %r reconnected", room)
                 await self._broadcast(ClientUpMsg(room=room), exclude=None)
+            elif existing and existing.ws is ws:
+                # Same client re-registering (e.g. hotkey update)
+                existing.hotkey = hotkey
+                existing.last_heartbeat = time.monotonic()
+                self.log.info("Room %r updated (hotkey=%r)", room, hotkey)
             else:
                 self._clients[room] = ClientEntry(ws, hotkey=hotkey)
                 self.log.info("Room %r registered (total clients: %d)", room, len(self._clients))

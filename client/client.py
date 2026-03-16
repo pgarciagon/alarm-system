@@ -108,6 +108,7 @@ class _AsyncCore:
         self._fallback_hotkey = fallback_hotkey
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._alarm_pending: Optional[asyncio.Event] = None
+        self._ws = None  # current websocket (set while connected)
         self._running = True
 
     # ------------------------------------------------------------------
@@ -204,6 +205,7 @@ class _AsyncCore:
                     ping_timeout=30,
                     open_timeout=10,
                 ) as ws:
+                    self._ws = ws
                     attempt = 0
                     self.log.info("Connected to server")
                     self._overlay.set_connected(True)
@@ -216,6 +218,7 @@ class _AsyncCore:
 
             except (ConnectionClosed, WebSocketException, OSError) as exc:
                 self.log.warning("Connection lost: %s", exc)
+                self._ws = None
                 self._overlay.set_connected(False)
             except asyncio.CancelledError:
                 break
@@ -229,6 +232,18 @@ class _AsyncCore:
         self.log.info("Server changed to %s — forcing reconnect", new_ip)
         if self._loop and self._loop.is_running() and hasattr(self, "_reconnect_event"):
             self._loop.call_soon_threadsafe(self._reconnect_event.set)
+
+    def send_register_update(self) -> None:
+        """Re-send RegisterMsg on the current connection (thread-safe)."""
+        ws = self._ws
+        if ws and self._loop and self._loop.is_running():
+            async def _send():
+                try:
+                    await ws.send(encode(RegisterMsg(room=self.cfg.room_name, hotkey=self.cfg.hotkey)))
+                    self.log.info("Sent register update (room=%r, hotkey=%r)", self.cfg.room_name, self.cfg.hotkey)
+                except Exception:
+                    pass
+            self._loop.call_soon_threadsafe(self._loop.create_task, _send())
 
     # ------------------------------------------------------------------
     # Receive loop
@@ -366,12 +381,13 @@ class AlarmClient:
     def _on_hotkey_changed(self, new_hotkey: str) -> None:
         """Called from GUI when user edits hotkey locally."""
         self._core._restart_hotkey(new_hotkey)
+        self._core.send_register_update()
 
     def _on_room_name_changed(self, new_name: str) -> None:
         """Called from GUI when user edits room name locally."""
         self._core.cfg.room_name = new_name
         save_client_config(self._core.cfg)
-        # The new name takes effect on the next server reconnect (RegisterMsg)
+        self._core.send_register_update()
 
     def _on_server_changed(self, new_ip: str) -> None:
         """Called from GUI after user picks a server from the scan dialog."""
