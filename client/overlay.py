@@ -63,6 +63,10 @@ class _UpdateClientList:
 class _SetConnected:
     connected: bool
 
+@dataclass
+class _UpdateHotkey:
+    hotkey: str
+
 
 # ---------------------------------------------------------------------------
 # Overlay manager  (main-thread only)
@@ -83,7 +87,8 @@ class OverlayManager:
 
     def __init__(self, stop_sound_cb=None, show_gui: bool = True,
                  room_name: str = "", server_info: str = "",
-                 stop_client_cb=None, hotkey: str = "") -> None:
+                 stop_client_cb=None, hotkey: str = "",
+                 change_hotkey_cb=None) -> None:
         self._q: queue.Queue = queue.Queue()
         self._root: Optional[tk.Tk] = None
         self._alarm_win: Optional[tk.Toplevel] = None
@@ -96,9 +101,11 @@ class OverlayManager:
         self._room_name = room_name
         self._server_info = server_info
         self._hotkey = hotkey
+        self._change_hotkey_cb = change_hotkey_cb
         self._tray: Optional[TrayIcon] = None
         self._status_win: Optional[tk.Toplevel] = None
         self._status_frame: Optional[tk.Frame] = None
+        self._hotkey_label: Optional[tk.Label] = None
         self._connected = False
 
     # ------------------------------------------------------------------
@@ -119,6 +126,9 @@ class OverlayManager:
 
     def set_connected(self, connected: bool) -> None:
         self._q.put(_SetConnected(connected=connected))
+
+    def update_hotkey(self, hotkey: str) -> None:
+        self._q.put(_UpdateHotkey(hotkey=hotkey))
 
     def stop(self) -> None:
         self._q.put(_Stop())
@@ -196,6 +206,9 @@ class OverlayManager:
         elif isinstance(cmd, _SetConnected):
             self._connected = cmd.connected
             self._refresh_connection_status()
+        elif isinstance(cmd, _UpdateHotkey):
+            self._hotkey = cmd.hotkey
+            self._refresh_hotkey_label()
         elif isinstance(cmd, _Stop):
             if self._tray:
                 self._tray.stop()
@@ -211,7 +224,7 @@ class OverlayManager:
         if self._alarm_win and self._alarm_win.winfo_exists():
             try:
                 self._alarm_win._room_label.config(  # type: ignore[attr-defined]
-                    text=f"\u26a0  ALARM \u2014 ZIMMER {room.upper()}  \u26a0"
+                    text=f"\u26a0  ALARM \u2014 {room.upper()}  \u26a0"
                 )
                 self._alarm_win._time_label.config(  # type: ignore[attr-defined]
                     text=f"Ausgelöst um {datetime.now().strftime('%H:%M:%S')}"
@@ -242,7 +255,7 @@ class OverlayManager:
 
         room_lbl = tk.Label(
             win,
-            text=f"\u26a0  ALARM \u2014 ZIMMER {room.upper()}  \u26a0",
+            text=f"\u26a0  ALARM \u2014 {room.upper()}  \u26a0",
             font=("Arial", 72, "bold"),
             bg=_RED_BRIGHT,
             fg=_WHITE,
@@ -260,18 +273,25 @@ class OverlayManager:
         )
         time_lbl.pack()
 
+        # Non-blinking dismiss button — use a frame to isolate it from flash
+        btn_frame = tk.Frame(win, bg=_WHITE, padx=3, pady=3)
+        btn_frame.pack(pady=40)
         dismiss_btn = tk.Button(
-            win,
+            btn_frame,
             text="BESTÄTIGEN  (ESC)",
             font=("Arial", 24, "bold"),
             bg=_WHITE,
             fg=_RED_BRIGHT,
-            relief="flat",
+            activebackground="#dddddd",
+            activeforeground=_RED_BRIGHT,
+            relief="raised",
+            bd=2,
             padx=30,
             pady=10,
+            cursor="hand2",
             command=self._hide_alarm,
         )
-        dismiss_btn.pack(pady=40)
+        dismiss_btn.pack()
 
         win._room_label = room_lbl  # type: ignore[attr-defined]
         win._time_label = time_lbl  # type: ignore[attr-defined]
@@ -310,6 +330,9 @@ class OverlayManager:
             self._alarm_win.configure(bg=colour)
             for widget in self._alarm_win.winfo_children():
                 try:
+                    # Skip the button frame — it should stay white
+                    if isinstance(widget, tk.Frame):
+                        continue
                     widget.configure(bg=colour)
                 except Exception:
                     pass
@@ -455,10 +478,13 @@ class OverlayManager:
             ).pack(side="left")
 
         if self._hotkey:
-            tk.Label(
+            self._hotkey_label = tk.Label(
                 info_row, text=f"Tastenkürzel: {self._hotkey.upper()}",
                 font=("Arial", 9, "bold"), bg=self._ST_HEADER_BG, fg="#fdcb6e",
-            ).pack(side="right")
+                cursor="hand2",
+            )
+            self._hotkey_label.pack(side="right")
+            self._hotkey_label.bind("<Button-1>", lambda _: self._edit_hotkey_dialog())
 
         # Connection status label
         self._conn_label = tk.Label(
@@ -498,6 +524,51 @@ class OverlayManager:
             self._conn_label.config(
                 text="\u25cf Warte auf Server\u2026", fg="#fdcb6e",
             )
+
+    def _refresh_hotkey_label(self) -> None:
+        """Update the hotkey label text."""
+        if self._hotkey_label and self._hotkey_label.winfo_exists():
+            self._hotkey_label.config(text=f"Tastenkürzel: {self._hotkey.upper()}")
+
+    def _edit_hotkey_dialog(self) -> None:
+        """Open a small dialog to edit the hotkey."""
+        if not self._status_win:
+            return
+        dlg = tk.Toplevel(self._status_win)
+        dlg.title("Tastenkürzel ändern")
+        dlg.configure(bg=self._ST_BG)
+        dlg.geometry("300x120")
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.transient(self._status_win)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg, text="Neues Tastenkürzel:", font=("Arial", 10),
+            bg=self._ST_BG, fg=self._ST_FG,
+        ).pack(pady=(15, 5))
+
+        var = tk.StringVar(value=self._hotkey)
+        entry = tk.Entry(dlg, textvariable=var, font=("Arial", 11), width=18, justify="center")
+        entry.pack()
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        def _apply():
+            new_hk = var.get().strip()
+            if new_hk and new_hk != self._hotkey:
+                self._hotkey = new_hk
+                self._refresh_hotkey_label()
+                if self._change_hotkey_cb:
+                    self._change_hotkey_cb(new_hk)
+            dlg.destroy()
+
+        entry.bind("<Return>", lambda _: _apply())
+        tk.Button(
+            dlg, text="Übernehmen", font=("Arial", 10, "bold"),
+            bg="#00b894", fg="white", relief="flat", padx=15, pady=4,
+            cursor="hand2", command=_apply,
+        ).pack(pady=10)
 
     def _minimize_status(self) -> None:
         """Hide the status window (keep running in tray)."""

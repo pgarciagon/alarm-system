@@ -15,13 +15,15 @@ from typing import Any, Dict, Union
 # Message type constants
 # ---------------------------------------------------------------------------
 
-MSG_REGISTER    = "register"
-MSG_ALARM       = "alarm"
-MSG_HEARTBEAT   = "heartbeat"
-MSG_DISMISS     = "dismiss"
-MSG_CLIENT_DOWN = "client_down"
-MSG_CLIENT_UP   = "client_up"
-MSG_CLIENT_LIST = "client_list"
+MSG_REGISTER      = "register"
+MSG_ALARM         = "alarm"
+MSG_HEARTBEAT     = "heartbeat"
+MSG_DISMISS       = "dismiss"
+MSG_CLIENT_DOWN   = "client_down"
+MSG_CLIENT_UP     = "client_up"
+MSG_CLIENT_LIST   = "client_list"
+MSG_REMOVE_CLIENT = "remove_client"
+MSG_SET_HOTKEY    = "set_hotkey"
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +33,7 @@ MSG_CLIENT_LIST = "client_list"
 @dataclass
 class RegisterMsg:
     room: str
+    hotkey: str = ""
     type: str = MSG_REGISTER
 
 
@@ -66,24 +69,39 @@ class ClientUpMsg:
 
 @dataclass
 class ClientListMsg:
-    clients: list  # [{"room": str, "is_down": bool}, ...]
+    clients: list  # [{"room": str, "is_down": bool, "hotkey": str}, ...]
     type: str = MSG_CLIENT_LIST
+
+
+@dataclass
+class RemoveClientMsg:
+    room: str
+    type: str = MSG_REMOVE_CLIENT
+
+
+@dataclass
+class SetHotkeyMsg:
+    room: str
+    hotkey: str
+    type: str = MSG_SET_HOTKEY
 
 
 # ---------------------------------------------------------------------------
 # Serialisation helpers
 # ---------------------------------------------------------------------------
 
-AnyMsg = Union[RegisterMsg, AlarmMsg, HeartbeatMsg, DismissMsg, ClientDownMsg, ClientUpMsg, ClientListMsg]
+AnyMsg = Union[RegisterMsg, AlarmMsg, HeartbeatMsg, DismissMsg, ClientDownMsg, ClientUpMsg, ClientListMsg, RemoveClientMsg, SetHotkeyMsg]
 
 _TYPE_MAP: Dict[str, type] = {
-    MSG_REGISTER:    RegisterMsg,
-    MSG_ALARM:       AlarmMsg,
-    MSG_HEARTBEAT:   HeartbeatMsg,
-    MSG_DISMISS:     DismissMsg,
-    MSG_CLIENT_DOWN: ClientDownMsg,
-    MSG_CLIENT_UP:   ClientUpMsg,
-    MSG_CLIENT_LIST: ClientListMsg,
+    MSG_REGISTER:      RegisterMsg,
+    MSG_ALARM:         AlarmMsg,
+    MSG_HEARTBEAT:     HeartbeatMsg,
+    MSG_DISMISS:       DismissMsg,
+    MSG_CLIENT_DOWN:   ClientDownMsg,
+    MSG_CLIENT_UP:     ClientUpMsg,
+    MSG_CLIENT_LIST:   ClientListMsg,
+    MSG_REMOVE_CLIENT: RemoveClientMsg,
+    MSG_SET_HOTKEY:    SetHotkeyMsg,
 }
 
 

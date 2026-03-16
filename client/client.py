@@ -45,12 +45,14 @@ from common.protocol import (
     ClientUpMsg,
     HeartbeatMsg,
     RegisterMsg,
+    SetHotkeyMsg,
     decode,
     encode,
     MSG_ALARM,
     MSG_CLIENT_DOWN,
     MSG_CLIENT_LIST,
     MSG_CLIENT_UP,
+    MSG_SET_HOTKEY,
 )
 from client.hotkey import make_hotkey_listener
 from client.overlay import OverlayManager
@@ -128,13 +130,26 @@ class _AsyncCore:
     # ------------------------------------------------------------------
 
     def _start_hotkey(self) -> None:
-        listener = make_hotkey_listener(
+        self._hotkey_listener = make_hotkey_listener(
             self.cfg.hotkey,
             callback=self._on_hotkey_pressed,
             fallback=self._fallback_hotkey,
         )
-        listener.start()
+        self._hotkey_listener.start()
         self.log.info("Hotkey listener started (%s)", self.cfg.hotkey)
+
+    def _restart_hotkey(self, new_hotkey: str) -> None:
+        """Change the global hotkey at runtime."""
+        if hasattr(self, '_hotkey_listener'):
+            self._hotkey_listener.stop()
+        self.cfg.hotkey = new_hotkey
+        self._hotkey_listener = make_hotkey_listener(
+            new_hotkey,
+            callback=self._on_hotkey_pressed,
+            fallback=self._fallback_hotkey,
+        )
+        self._hotkey_listener.start()
+        self.log.info("Hotkey changed to %s", new_hotkey)
 
     def _on_hotkey_pressed(self) -> None:
         self.log.info("Hotkey pressed — queuing alarm for room %r", self.cfg.room_name)
@@ -166,7 +181,7 @@ class _AsyncCore:
                     attempt = 0
                     self.log.info("Connected to server")
                     self._overlay.set_connected(True)
-                    await ws.send(encode(RegisterMsg(room=self.cfg.room_name)))
+                    await ws.send(encode(RegisterMsg(room=self.cfg.room_name, hotkey=self.cfg.hotkey)))
                     await asyncio.gather(
                         self._receive_loop(ws),
                         self._heartbeat_loop(ws),
@@ -205,6 +220,12 @@ class _AsyncCore:
                 self._overlay.show_banner(msg.room, up=True)  # type: ignore[union-attr]
             elif msg.type == MSG_CLIENT_LIST:
                 self._overlay.update_client_list(msg.clients)  # type: ignore[union-attr]
+            elif msg.type == MSG_SET_HOTKEY:
+                new_hotkey = msg.hotkey  # type: ignore[union-attr]
+                self.log.info("Hotkey changed to %r by server", new_hotkey)
+                self.cfg.hotkey = new_hotkey
+                self._overlay.update_hotkey(new_hotkey)
+                self._restart_hotkey(new_hotkey)
 
     # ------------------------------------------------------------------
     # Heartbeat loop
@@ -261,6 +282,7 @@ class AlarmClient:
             server_info=f"{cfg.server_ip}:{cfg.server_port}",
             stop_client_cb=self.stop,
             hotkey=cfg.hotkey,
+            change_hotkey_cb=self._on_hotkey_changed,
         )
         self._core = _AsyncCore(
             cfg=cfg,
@@ -289,6 +311,10 @@ class AlarmClient:
         self._sound.stop()
         self._core.shutdown()
         bg.join(timeout=3)
+
+    def _on_hotkey_changed(self, new_hotkey: str) -> None:
+        """Called from GUI when user edits hotkey locally."""
+        self._core._restart_hotkey(new_hotkey)
 
     def stop(self) -> None:
         """Signal both the overlay and the async core to shut down."""

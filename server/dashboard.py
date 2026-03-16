@@ -59,8 +59,8 @@ class ServerDashboard:
         self._root.title("Alarm Server — Dashboard")
         set_window_icon(self._root, "alarm_server.ico")
         self._root.configure(bg=_BG)
-        self._root.geometry("620x460")
-        self._root.minsize(500, 350)
+        self._root.geometry("700x460")
+        self._root.minsize(600, 350)
         # Hide from taskbar — only show in system tray
         self._root.attributes("-toolwindow", True)
         self._root.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
@@ -155,7 +155,7 @@ class ServerDashboard:
         # Table header
         hdr = tk.Frame(wrapper, bg=_BLUE, padx=10, pady=6)
         hdr.pack(fill=tk.X)
-        for col, (text, w) in enumerate([("Raum", 20), ("Status", 12), ("Letzter Heartbeat", 20)]):
+        for col, (text, w) in enumerate([("Raum", 14), ("Status", 10), ("Hotkey", 10), ("Heartbeat", 10), ("", 6)]):
             tk.Label(
                 hdr, text=text, font=("Arial", 10, "bold"),
                 fg=_FG, bg=_BLUE, anchor="w", width=w,
@@ -218,7 +218,7 @@ class ServerDashboard:
                 # Room name
                 tk.Label(
                     row, text=snap.room, font=("Arial", 10),
-                    fg=_FG, bg=row_bg, anchor="w", width=20,
+                    fg=_FG, bg=row_bg, anchor="w", width=14,
                 ).grid(row=0, column=0, sticky="w")
 
                 # Status indicator
@@ -231,8 +231,18 @@ class ServerDashboard:
 
                 tk.Label(
                     row, text=f"\u25cf {status_text}", font=("Arial", 10, "bold"),
-                    fg=status_color, bg=row_bg, anchor="w", width=12,
+                    fg=status_color, bg=row_bg, anchor="w", width=10,
                 ).grid(row=0, column=1, sticky="w")
+
+                # Hotkey (clickable to edit)
+                hk_text = snap.hotkey.upper() if snap.hotkey else "—"
+                hk_lbl = tk.Label(
+                    row, text=hk_text, font=("Arial", 10),
+                    fg=_AMBER, bg=row_bg, anchor="w", width=10,
+                    cursor="hand2",
+                )
+                hk_lbl.grid(row=0, column=2, sticky="w")
+                hk_lbl.bind("<Button-1>", lambda _e, r=snap.room, h=snap.hotkey: self._edit_hotkey(r, h))
 
                 # Last heartbeat age
                 age = now - snap.last_heartbeat
@@ -246,8 +256,16 @@ class ServerDashboard:
                 tk.Label(
                     row, text=age_text, font=("Arial", 10),
                     fg="#aaaaaa" if not snap.is_down else _RED,
-                    bg=row_bg, anchor="w", width=20,
-                ).grid(row=0, column=2, sticky="w")
+                    bg=row_bg, anchor="w", width=10,
+                ).grid(row=0, column=3, sticky="w")
+
+                # Remove button
+                tk.Button(
+                    row, text="\u2716", font=("Arial", 9),
+                    bg=row_bg, fg=_RED, relief="flat",
+                    cursor="hand2", width=3,
+                    command=lambda r=snap.room: self._remove_client(r),
+                ).grid(row=0, column=4, sticky="e")
 
                 self._client_widgets.append(row)
 
@@ -264,6 +282,51 @@ class ServerDashboard:
         # Reschedule
         if self._root:
             self._root.after(self.REFRESH_MS, self._refresh_clients)
+
+    # ------------------------------------------------------------------
+    # Client actions
+    # ------------------------------------------------------------------
+
+    def _remove_client(self, room: str) -> None:
+        """Remove a client from the server registry."""
+        self._server.remove_client(room)
+
+    def _edit_hotkey(self, room: str, current_hotkey: str) -> None:
+        """Open a dialog to change a client's hotkey."""
+        if not self._root:
+            return
+        dlg = tk.Toplevel(self._root)
+        dlg.title(f"Hotkey — {room}")
+        dlg.configure(bg=_BG)
+        dlg.geometry("300x120")
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.transient(self._root)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg, text=f"Hotkey für {room}:", font=("Arial", 10),
+            bg=_BG, fg=_FG,
+        ).pack(pady=(15, 5))
+
+        var = tk.StringVar(value=current_hotkey)
+        entry = tk.Entry(dlg, textvariable=var, font=("Arial", 11), width=18, justify="center")
+        entry.pack()
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        def _apply():
+            new_hk = var.get().strip()
+            if new_hk:
+                self._server.set_client_hotkey(room, new_hk)
+            dlg.destroy()
+
+        entry.bind("<Return>", lambda _: _apply())
+        tk.Button(
+            dlg, text="Übernehmen", font=("Arial", 10, "bold"),
+            bg=_GREEN, fg="white", relief="flat", padx=15, pady=4,
+            cursor="hand2", command=_apply,
+        ).pack(pady=10)
 
     # ------------------------------------------------------------------
     # Tray integration

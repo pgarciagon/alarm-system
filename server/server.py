@@ -40,12 +40,16 @@ from common.protocol import (
     ClientUpMsg,
     HeartbeatMsg,
     RegisterMsg,
+    RemoveClientMsg,
+    SetHotkeyMsg,
     decode,
     encode,
     MSG_ALARM,
     MSG_HEARTBEAT,
     MSG_REGISTER,
     MSG_DISMISS,
+    MSG_REMOVE_CLIENT,
+    MSG_SET_HOTKEY,
 )
 
 
@@ -77,12 +81,13 @@ def _setup_logging(log_file: str) -> logging.Logger:
 # ---------------------------------------------------------------------------
 
 class ClientEntry:
-    __slots__ = ("ws", "last_heartbeat", "is_down")
+    __slots__ = ("ws", "last_heartbeat", "is_down", "hotkey")
 
-    def __init__(self, ws: _WS) -> None:
+    def __init__(self, ws: _WS, hotkey: str = "") -> None:
         self.ws = ws
         self.last_heartbeat: float = time.monotonic()
         self.is_down: bool = False
+        self.hotkey: str = hotkey
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +99,7 @@ class ClientSnapshot:
     room: str
     is_down: bool
     last_heartbeat: float  # time.monotonic() timestamp
+    hotkey: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +146,8 @@ class AlarmServer:
     def get_client_snapshot(self) -> List[ClientSnapshot]:
         """Return a snapshot of all clients.  GIL-safe for cross-thread reads."""
         return [
-            ClientSnapshot(room=room, is_down=e.is_down, last_heartbeat=e.last_heartbeat)
+            ClientSnapshot(room=room, is_down=e.is_down,
+                          last_heartbeat=e.last_heartbeat, hotkey=e.hotkey)
             for room, e in self._clients.items()
         ]
 
@@ -148,6 +155,22 @@ class AlarmServer:
         """Signal the server to stop (thread-safe)."""
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._stop_event.set)
+
+    def remove_client(self, room: str) -> None:
+        """Remove a client from the registry (thread-safe, called from GUI)."""
+        if self._loop and self._loop.is_running():
+            msg = RemoveClientMsg(room=room)
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._on_remove_client(msg))
+            )
+
+    def set_client_hotkey(self, room: str, hotkey: str) -> None:
+        """Change a client's hotkey (thread-safe, called from GUI)."""
+        if self._loop and self._loop.is_running():
+            msg = SetHotkeyMsg(room=room, hotkey=hotkey)
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._on_set_hotkey(msg))
+            )
 
     # ------------------------------------------------------------------
     # Per-connection handler
@@ -177,6 +200,12 @@ class AlarmServer:
                 elif msg.type == MSG_DISMISS:
                     pass  # reserved for future use
 
+                elif msg.type == MSG_REMOVE_CLIENT:
+                    await self._on_remove_client(msg)  # type: ignore[arg-type]
+
+                elif msg.type == MSG_SET_HOTKEY:
+                    await self._on_set_hotkey(msg)  # type: ignore[arg-type]
+
                 else:
                     self.log.warning("Unknown message type %r from %s", msg.type, remote)
 
@@ -192,6 +221,7 @@ class AlarmServer:
 
     async def _on_register(self, ws: _WS, msg: RegisterMsg) -> str:
         room = msg.room
+        hotkey = getattr(msg, 'hotkey', '') or ''
         async with self._lock:
             existing = self._clients.get(room)
             if existing and existing.is_down:
@@ -199,10 +229,11 @@ class AlarmServer:
                 existing.ws = ws
                 existing.last_heartbeat = time.monotonic()
                 existing.is_down = False
+                existing.hotkey = hotkey
                 self.log.info("Room %r reconnected", room)
                 await self._broadcast(ClientUpMsg(room=room), exclude=None)
             else:
-                self._clients[room] = ClientEntry(ws)
+                self._clients[room] = ClientEntry(ws, hotkey=hotkey)
                 self.log.info("Room %r registered (total clients: %d)", room, len(self._clients))
             await self._broadcast_client_list()
 
@@ -228,6 +259,31 @@ class AlarmServer:
             "all other clients" if exclude else "all clients (including sender)",
         )
         await self._broadcast(AlarmMsg(room=msg.room), exclude=exclude)
+
+    async def _on_remove_client(self, msg: RemoveClientMsg) -> None:
+        async with self._lock:
+            entry = self._clients.pop(msg.room, None)
+            if entry:
+                self.log.info("Room %r removed by server", msg.room)
+                try:
+                    await entry.ws.close()
+                except Exception:
+                    pass
+                await self._broadcast(ClientDownMsg(room=msg.room), exclude=msg.room)
+                await self._broadcast_client_list()
+
+    async def _on_set_hotkey(self, msg: SetHotkeyMsg) -> None:
+        async with self._lock:
+            entry = self._clients.get(msg.room)
+            if entry:
+                entry.hotkey = msg.hotkey
+                if not entry.is_down:
+                    try:
+                        await entry.ws.send(encode(SetHotkeyMsg(room=msg.room, hotkey=msg.hotkey)))
+                    except Exception:
+                        pass
+                self.log.info("Hotkey for room %r set to %r", msg.room, msg.hotkey)
+                await self._broadcast_client_list()
 
     async def _on_disconnect(self, room: str) -> None:
         async with self._lock:
@@ -265,7 +321,7 @@ class AlarmServer:
     def _build_client_list_msg(self) -> ClientListMsg:
         """Build a client_list message from current state (call inside self._lock)."""
         clients = [
-            {"room": room, "is_down": entry.is_down}
+            {"room": room, "is_down": entry.is_down, "hotkey": entry.hotkey}
             for room, entry in self._clients.items()
         ]
         return ClientListMsg(clients=clients)
