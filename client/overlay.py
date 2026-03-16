@@ -586,14 +586,25 @@ class OverlayManager:
 
         if not clients:
             tk.Label(
-                frame, text="Keine Clients verbunden",
+                frame, text="Keine weiteren Clients verbunden",
                 font=("Arial", 10), bg=self._ST_BG, fg="#888888",
             ).pack(pady=20)
-            self._status_footer.config(text="Verbundene Clients: 0/0")
+            self._status_footer.config(text="Andere Clients: 0/0")
+            return
+
+        # Filter out this client's own room — only show others
+        others = [c for c in clients if c.get("room", "") != self._room_name]
+
+        if not others:
+            tk.Label(
+                frame, text="Keine weiteren Clients verbunden",
+                font=("Arial", 10), bg=self._ST_BG, fg="#888888",
+            ).pack(pady=20)
+            self._status_footer.config(text="Andere Clients: 0/0")
             return
 
         online_count = 0
-        for c in sorted(clients, key=lambda x: x.get("room", "")):
+        for c in sorted(others, key=lambda x: x.get("room", "")):
             room = c.get("room", "?")
             is_down = c.get("is_down", False)
             if not is_down:
@@ -621,9 +632,9 @@ class OverlayManager:
                 bg=self._ST_BG, fg=color,
             ).pack(side="right", padx=(0, 4))
 
-        total = len(clients)
+        total = len(others)
         self._status_footer.config(
-            text=f"Verbundene Clients: {online_count}/{total}"
+            text=f"Andere Clients: {online_count}/{total}"
         )
 
     # ------------------------------------------------------------------
