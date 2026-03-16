@@ -120,6 +120,49 @@ If no config file is found at startup a default is written to the working direct
 
 ---
 
+## macOS Deployment (production)
+
+### Option A — Download DMG from GitHub Releases (recommended)
+
+1. Go to [**Releases**](https://github.com/pgarciagon/alarm-system/releases/latest)
+2. Download **`AlarmInstaller.dmg`**
+3. Open the DMG → drag **AlarmInstaller.app** into **Applications**
+4. Open **AlarmInstaller.app** → choose SERVER or CLIENT → install
+
+That's it — no Python, no build tools, no command line needed.
+
+### Option B — Build from source
+
+Build `AlarmInstaller.app` + `AlarmInstaller.dmg` once, then copy to every Mac:
+
+```bash
+# From the repo root (requires Python 3.12 + Homebrew):
+brew install python@3.12 python-tk@3.12
+pip install pyinstaller websockets keyboard pygame pystray Pillow
+/opt/homebrew/opt/python@3.12/bin/python3.12 -m PyInstaller scripts/alarm_installer_mac.spec
+bash scripts/create_dmg.sh
+# → dist/AlarmInstaller.dmg   ← copy this to USB
+```
+
+### macOS installer workflow
+
+1. **Server Mac** → open AlarmInstaller.app → choose **SERVER** → install
+2. **Each room Mac** → open AlarmInstaller.app → choose **CLIENT** → installer auto-detects server IP → set room name → install
+3. Done — launchd handles auto-start at every login
+
+The installer:
+- Probes the LAN to detect a running server
+- Writes `/Applications/AlarmSystem/server_config.toml` or `client_config.toml`
+- Registers a launchd agent in `~/Library/LaunchAgents/` for auto-start
+- Offers "Jetzt starten" / "Später starten" on completion
+
+### Accessibility permission (Client only)
+
+The global hotkey (Alt+N) requires Accessibility permission:
+> System Settings → Privacy & Security → Accessibility → add Terminal or AlarmInstaller.app
+
+---
+
 ## macOS Simulation (development)
 
 ### Requirements
@@ -218,7 +261,10 @@ alarm-system/
 │   ├── alarm_installer.spec        PyInstaller spec → alarm_installer.exe
 │   ├── build_executables.sh        Build script (server + client + installer)
 │   ├── install_autostart_windows.py  Direct Task Scheduler registration
-│   └── install_autostart_mac.py    macOS launchd plist registration
+│   ├── install_autostart_mac.py    macOS launchd plist registration
+│   ├── installer_mac.py            macOS GUI installer (server/client chooser)
+│   ├── alarm_installer_mac.spec    PyInstaller spec → AlarmInstaller.app
+│   └── create_dmg.sh               Packages AlarmInstaller.app into AlarmInstaller.dmg
 │
 ├── sim/
 │   ├── run_simulation.sh           macOS multi-window simulation launcher
