@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import sys
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
@@ -438,8 +439,9 @@ class OverlayManager:
         win.configure(bg=self._ST_BG)
         win.geometry("350x340")
         win.resizable(True, True)
-        # Hide from taskbar — only show in system tray
-        win.attributes("-toolwindow", True)
+        # Hide from taskbar — Windows only (-toolwindow not supported on macOS)
+        if sys.platform == "win32":
+            win.attributes("-toolwindow", True)
         win.protocol("WM_DELETE_WINDOW", self._minimize_status)
 
         # Header
