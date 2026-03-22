@@ -60,7 +60,8 @@ def is_autostart_enabled(role: str, room_name: str = "") -> Optional[bool]:
     if r.returncode != 0:
         return None
     # Look for "Scheduled Task State:" or "Status:" line
-    for line in r.stdout.splitlines():
+    stdout = r.stdout or ""
+    for line in stdout.splitlines():
         low = line.lower().strip()
         if "status des geplanten tasks" in low or "scheduled task state" in low:
             return "deaktiviert" not in low and "disabled" not in low
