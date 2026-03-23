@@ -344,10 +344,10 @@ class AlarmClient:
     def __init__(self, cfg: ClientConfig, fallback_hotkey: bool = False,
                  show_gui: bool = True) -> None:
         self.cfg = cfg
-        # Generate unique room name if using default
-        if cfg.room_name == "Room 1":
+        # Generate unique room name if using default — never persist so
+        # each process always gets its own distinct name.
+        if cfg.room_name in ("Room 1", "Room 2", "Room 3"):
             cfg.room_name = _generate_unique_room_name()
-            save_client_config(cfg)  # Persist the unique name
         self.log = _setup_logging(cfg.log_file)
         self._sound = SoundPlayer(cfg.alarm_sound)
         self._overlay = OverlayManager(
