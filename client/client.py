@@ -25,6 +25,7 @@ import os
 import signal
 import sys
 import threading
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -64,6 +65,13 @@ from client.sound import SoundPlayer
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+
+def _generate_unique_room_name() -> str:
+    """Generate a unique room name based on UUID if using default name."""
+    # Use first 8 chars of UUID for a short unique identifier
+    unique_id = str(uuid.uuid4())[:8].upper()
+    return f"Room-{unique_id}"
+
 
 def _setup_logging(log_file: str) -> logging.Logger:
     logger = logging.getLogger("alarm.client")
@@ -336,6 +344,9 @@ class AlarmClient:
     def __init__(self, cfg: ClientConfig, fallback_hotkey: bool = False,
                  show_gui: bool = True) -> None:
         self.cfg = cfg
+        # Generate unique room name if using default
+        if cfg.room_name == "Room 1":
+            cfg.room_name = _generate_unique_room_name()
         self.log = _setup_logging(cfg.log_file)
         self._sound = SoundPlayer(cfg.alarm_sound)
         self._overlay = OverlayManager(
