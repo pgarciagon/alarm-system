@@ -67,10 +67,10 @@ from client.sound import SoundPlayer
 # ---------------------------------------------------------------------------
 
 def _generate_unique_room_name() -> str:
-    """Generate a unique room name based on UUID if using default name."""
-    # Use first 8 chars of UUID for a short unique identifier
-    unique_id = str(uuid.uuid4())[:8].upper()
-    return f"Room-{unique_id}"
+    """Generate a unique room name using process ID."""
+    # Each process gets a unique PID, ensuring distinct room names
+    pid = os.getpid()
+    return f"Room-{pid}"
 
 
 def _setup_logging(log_file: str) -> logging.Logger:
