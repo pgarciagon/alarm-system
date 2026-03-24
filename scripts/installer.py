@@ -301,6 +301,25 @@ def create_shortcuts(exe: Path, role: str, config_path: Path,
 # Config writers
 # ---------------------------------------------------------------------------
 
+def read_existing_config(path: Path) -> dict:
+    """Read an existing TOML config file and return key-value pairs."""
+    result = {}
+    if not path.exists():
+        return result
+    try:
+        text = path.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("["):
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip('"')
+                result[key] = val
+    except Exception:
+        pass
+    return result
+
+
 def write_server_config(path: Path, port: int, silent_alarm: bool) -> None:
     path.write_text(textwrap.dedent(f"""\
         [server]
@@ -1392,19 +1411,36 @@ class InstallerApp(tk.Tk):
     def _build_server_config_page(self) -> None:
         self._clear()
 
-        tk.Label(self, text="Server-Konfiguration",
+        # Pre-fill from existing server config
+        existing = {}
+        srv_cfg = INSTALL_DIR / "server_config.toml"
+        if srv_cfg.exists():
+            existing = read_existing_config(srv_cfg)
+
+        default_port = existing.get("port", self._port_var.get())
+        default_silent = existing.get("silent_alarm", "true").lower() == "true"
+
+        title = "Server-Konfiguration"
+        if existing:
+            title += "  (bestehende Werte geladen)"
+
+        tk.Label(self, text=title,
                  font=("Arial", 18, "bold"), bg=self._BG, fg=self._ACCENT).pack(pady=(30, 20))
+
+        if existing:
+            tk.Label(self, text="⚙ Werte aus bestehender Installation geladen",
+                     font=("Arial", 10), bg=self._BG, fg=self._GREEN).pack(pady=(0, 10))
 
         frm = tk.Frame(self, bg=self._BG)
         frm.pack(pady=5)
 
         tk.Label(frm, text="Port:", font=("Arial", 11),
                  bg=self._BG, fg=self._FG).grid(row=0, column=0, sticky="e", padx=10, pady=6)
-        self._cfg_port = tk.StringVar(value=self._port_var.get())
+        self._cfg_port = tk.StringVar(value=str(default_port))
         tk.Entry(frm, textvariable=self._cfg_port, width=10,
                  font=("Arial", 11)).grid(row=0, column=1, sticky="w")
 
-        self._silent_var = tk.BooleanVar(value=True)
+        self._silent_var = tk.BooleanVar(value=default_silent)
         tk.Checkbutton(frm, text="Stiller Alarm (auslösendes Zimmer wird nicht benachrichtigt)",
                        variable=self._silent_var,
                        font=("Arial", 10), bg=self._BG, fg=self._FG,
@@ -1432,8 +1468,31 @@ class InstallerApp(tk.Tk):
     def _build_client_config_page(self) -> None:
         self._clear()
 
-        tk.Label(self, text="Client-Konfiguration",
+        # Try to pre-fill from existing installation
+        existing = {}
+        clients = find_installed_clients()
+        if clients:
+            # Use first installed client's config for pre-fill
+            cfg_path = clients[0].get("config")
+            if cfg_path:
+                existing = read_existing_config(cfg_path)
+
+        default_room = existing.get("room_name", "Zimmer 1")
+        default_ip = existing.get("server_ip",
+                                  getattr(self, "_server_ip_var", tk.StringVar()).get())
+        default_port = existing.get("server_port", self._port_var.get())
+        default_hotkey = existing.get("hotkey", "alt+n")
+
+        title = "Client-Konfiguration"
+        if existing:
+            title += "  (bestehende Werte geladen)"
+
+        tk.Label(self, text=title,
                  font=("Arial", 18, "bold"), bg=self._BG, fg=self._ACCENT).pack(pady=(30, 20))
+
+        if existing:
+            tk.Label(self, text="⚙ Werte aus bestehender Installation geladen",
+                     font=("Arial", 10), bg=self._BG, fg=self._GREEN).pack(pady=(0, 10))
 
         frm = tk.Frame(self, bg=self._BG)
         frm.pack(pady=5)
@@ -1444,23 +1503,22 @@ class InstallerApp(tk.Tk):
                 row=row, column=0, sticky="e", padx=10, pady=6)
 
         lbl(0, "Zimmername:")
-        self._room_var = tk.StringVar(value="Zimmer 1")
+        self._room_var = tk.StringVar(value=default_room)
         tk.Entry(frm, textvariable=self._room_var, width=22,
                  font=("Arial", 11)).grid(row=0, column=1, sticky="w")
 
         lbl(1, "Server-IP:")
-        self._sip_var = tk.StringVar(value=getattr(self, "_server_ip_var",
-                                                    tk.StringVar()).get())
+        self._sip_var = tk.StringVar(value=default_ip)
         tk.Entry(frm, textvariable=self._sip_var, width=22,
                  font=("Arial", 11)).grid(row=1, column=1, sticky="w")
 
         lbl(2, "Port:")
-        self._cli_port = tk.StringVar(value=self._port_var.get())
+        self._cli_port = tk.StringVar(value=str(default_port))
         tk.Entry(frm, textvariable=self._cli_port, width=10,
                  font=("Arial", 11)).grid(row=2, column=1, sticky="w")
 
         lbl(3, "Tastenkürzel:")
-        self._hotkey_var = tk.StringVar(value="alt+n")
+        self._hotkey_var = tk.StringVar(value=default_hotkey)
         tk.Entry(frm, textvariable=self._hotkey_var, width=14,
                  font=("Arial", 11)).grid(row=3, column=1, sticky="w")
         tk.Label(frm, text="(z.B. alt+n, ctrl+F12)",
@@ -1508,8 +1566,12 @@ class InstallerApp(tk.Tk):
                 lambda: self._run_server_install(port), role="server")
             return
 
-        # Skip existence check in dev/update mode
-        if not self._dev_mode and not self._update_mode:
+        # Update mode: skip config form, just update exe + task + shortcuts
+        if self._update_mode:
+            self._run_server_install(port)
+            return
+
+        if not self._dev_mode:
             info = detect_existing_installation("server")
             if info["exe_exists"] or info["task_exists"] or info["process_running"]:
                 self._show_overwrite_dialog("server", info,

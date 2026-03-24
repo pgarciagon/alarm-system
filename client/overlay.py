@@ -717,7 +717,8 @@ class OverlayManager:
         ).pack(side="right", padx=(0, 4))
 
         # Initialize settings state (used by settings dialog)
-        self._autostart_enabled = is_autostart_enabled("client", self._room_name)
+        _auto = is_autostart_enabled("client", self._room_name)
+        self._autostart_enabled = _auto if _auto is not None else False
         self._settings_dlg = None
 
         # Alarm button row
@@ -829,22 +830,44 @@ class OverlayManager:
         self._muted = not self._muted
         if self._toggle_mute_cb:
             self._toggle_mute_cb(self._muted)
-        # Update button label and colour
+        # Update toggle switch
         if self._mute_btn_canvas and self._mute_btn_canvas.winfo_exists():
-            label = "🔕 Stumm" if self._muted else "🔔 Ton an"
-            bg = self._ST_RED if self._muted else "#1a3a5c"
-            self._mute_btn_canvas.config(bg=bg)
-            for item in self._mute_btn_canvas.find_all():
-                self._mute_btn_canvas.itemconfig(item, fill="white" if self._muted else self._ST_FG)
-            # update button text via the named tag
-            try:
-                self._mute_btn_canvas.itemconfig("txt", text=label)
-            except Exception:
-                pass
+            self._draw_toggle_switch(self._mute_btn_canvas, 44, 22, not self._muted)
+        # Update label
+        if hasattr(self, '_mute_lbl') and self._mute_lbl.winfo_exists():
+            self._mute_lbl.config(
+                text="OFF" if self._muted else "ON",
+                fg="#e94560" if self._muted else "#00b894",
+            )
 
     # ------------------------------------------------------------------
     # Auto-start toggle
     # ------------------------------------------------------------------
+
+    def _draw_toggle_switch(self, canvas: tk.Canvas, w: int, h: int,
+                            enabled: bool) -> None:
+        """Draw an ON/OFF toggle switch on a canvas."""
+        canvas.delete("all")
+        r = h // 2
+        if enabled:
+            # Green track
+            canvas.create_oval(0, 0, h, h, fill="#00b894", outline="#00b894")
+            canvas.create_oval(w - h, 0, w, h, fill="#00b894", outline="#00b894")
+            canvas.create_rectangle(r, 0, w - r, h, fill="#00b894", outline="#00b894")
+            # White knob on right
+            pad = 2
+            canvas.create_oval(w - h + pad, pad, w - pad, h - pad,
+                               fill="white", outline="white")
+        else:
+            # Dark track
+            track = "#555555"
+            canvas.create_oval(0, 0, h, h, fill=track, outline=track)
+            canvas.create_oval(w - h, 0, w, h, fill=track, outline=track)
+            canvas.create_rectangle(r, 0, w - r, h, fill=track, outline=track)
+            # White knob on left
+            pad = 2
+            canvas.create_oval(pad, pad, h - pad, h - pad,
+                               fill="white", outline="white")
 
     def _autostart_btn_text(self) -> str:
         if self._autostart_enabled is None:
@@ -855,26 +878,28 @@ class OverlayManager:
         if self._autostart_enabled is None:
             return
         new_state = not self._autostart_enabled
-        if set_autostart("client", self._room_name, new_state):
+        success = set_autostart("client", self._room_name, new_state)
+        if success:
             self._autostart_enabled = new_state
-            if self._autostart_canvas and self._autostart_canvas.winfo_exists():
-                bg = "#1a3a5c" if new_state else "#3a1a1a"
-                new_text = self._autostart_btn_text()
-                # Resize canvas to fit new text
-                font = ("Arial", 8)
-                _probe = tk.Label(self._autostart_canvas, text=new_text, font=font)
-                _probe.update_idletasks()
-                tw, th = _probe.winfo_reqwidth(), _probe.winfo_reqheight()
-                _probe.destroy()
-                w, h = tw + 12, th + 2
-                self._autostart_canvas.config(bg=bg, width=w, height=h)
-                try:
-                    self._autostart_canvas.delete("txt")
-                    self._autostart_canvas.create_text(
-                        w // 2, h // 2, text=new_text,
-                        font=font, fill=self._ST_FG, tags="txt")
-                except Exception:
-                    pass
+        else:
+            # Toggle visually anyway but warn
+            self._autostart_enabled = new_state
+        # Update toggle switch
+        if self._autostart_canvas and self._autostart_canvas.winfo_exists():
+            self._draw_toggle_switch(self._autostart_canvas, 44, 22, self._autostart_enabled)
+        # Update label
+        if hasattr(self, '_autostart_lbl') and self._autostart_lbl.winfo_exists():
+            self._autostart_lbl.config(
+                text="ON" if self._autostart_enabled else "OFF",
+                fg="#00b894" if self._autostart_enabled else "#e94560",
+            )
+        if not success:
+            from tkinter import messagebox
+            messagebox.showwarning(
+                "Autostart",
+                "Autostart konnte nicht geändert werden.\n"
+                "Bitte als Administrator ausführen oder über den Installer konfigurieren.",
+            )
 
     # ------------------------------------------------------------------
     # Server scan dialog
@@ -1243,32 +1268,53 @@ class OverlayManager:
                   font=("Arial", 8), padx=6, pady=1,
                   ).pack(side="right")
 
-        # Mute toggle
+        # Mute toggle switch
         mute_frm = tk.Frame(dlg, bg=bg)
         mute_frm.pack(fill="x", padx=20, pady=4)
         tk.Label(mute_frm, text="Alarmton:",
                  font=("Arial", 10), bg=bg, fg=fg).pack(side="left")
-        self._mute_btn_canvas = _make_btn(
-            mute_frm, text="Ton an", bg="#1a3a5c", fg=fg,
-            command=self._toggle_mute,
-            font=("Arial", 9), padx=8, pady=2,
+        mute_toggle_frm = tk.Frame(mute_frm, bg=bg)
+        mute_toggle_frm.pack(side="right")
+        self._mute_lbl = tk.Label(
+            mute_toggle_frm,
+            text="OFF" if self._muted else "ON",
+            font=("Arial", 9, "bold"),
+            bg=bg,
+            fg="#e94560" if self._muted else "#00b894",
+        )
+        self._mute_lbl.pack(side="right", padx=(6, 0))
+        self._mute_btn_canvas = tk.Canvas(
+            mute_toggle_frm, width=44, height=22,
+            bg=bg, highlightthickness=0, cursor="hand2",
         )
         self._mute_btn_canvas.pack(side="right")
+        self._draw_toggle_switch(self._mute_btn_canvas, 44, 22, not self._muted)
+        self._mute_btn_canvas.bind("<Button-1>", lambda _: self._toggle_mute())
 
-        # Autostart toggle
+        # Autostart toggle switch
         auto_frm = tk.Frame(dlg, bg=bg)
         auto_frm.pack(fill="x", padx=20, pady=4)
         tk.Label(auto_frm, text="Autostart:",
                  font=("Arial", 10), bg=bg, fg=fg).pack(side="left")
-        self._autostart_canvas = _make_btn(
-            auto_frm,
-            text=self._autostart_btn_text(),
-            bg="#1a3a5c" if self._autostart_enabled else "#3a1a1a",
-            fg=fg,
-            command=self._toggle_autostart,
-            font=("Arial", 9), padx=8, pady=2,
+        toggle_frm = tk.Frame(auto_frm, bg=bg)
+        toggle_frm.pack(side="right")
+        self._autostart_lbl = tk.Label(
+            toggle_frm,
+            text="ON" if self._autostart_enabled else "OFF",
+            font=("Arial", 9, "bold"),
+            bg=bg,
+            fg="#00b894" if self._autostart_enabled else "#e94560",
+        )
+        self._autostart_lbl.pack(side="right", padx=(6, 0))
+        sw_w, sw_h = 44, 22
+        self._autostart_canvas = tk.Canvas(
+            toggle_frm, width=sw_w, height=sw_h,
+            bg=bg, highlightthickness=0, cursor="hand2",
         )
         self._autostart_canvas.pack(side="right")
+        self._draw_toggle_switch(self._autostart_canvas, sw_w, sw_h,
+                                  self._autostart_enabled)
+        self._autostart_canvas.bind("<Button-1>", lambda _: self._toggle_autostart())
 
         # OK button
         _make_btn(dlg, text="Schließen", bg="#00b894", fg="white",

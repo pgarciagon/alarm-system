@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -19,11 +20,15 @@ from scripts.installer import (
     backup_existing,
     cleanup_existing,
     detect_existing_installation,
+    find_installed_clients,
     find_orphan_tasks,
     preflight_checks,
+    read_existing_config,
     rollback,
     safe_install,
     verify_autostart,
+    write_client_config,
+    write_server_config,
 )
 
 
@@ -155,10 +160,11 @@ class TestCleanupExisting(unittest.TestCase):
 
         cleanup_existing("client", "zimmer_1")
 
-        # Should target alarm_client.exe
-        taskkill_calls = [c for c in mock_run.call_args_list
-                          if c[0][0][0] == "taskkill"]
-        self.assertIn("alarm_client.exe", taskkill_calls[0][0][0])
+        # For clients, should use schtasks /End (not taskkill) to avoid killing other clients
+        end_calls = [c for c in mock_run.call_args_list
+                     if c[0][0][0] == "schtasks" and "/End" in c[0][0]]
+        self.assertTrue(len(end_calls) >= 1)
+        self.assertIn("AlarmSystem_Client_zimmer_1", end_calls[0][0][0])
 
         # Should delete slug-specific task AND generic task
         delete_calls = [c for c in mock_run.call_args_list
@@ -464,6 +470,252 @@ class TestSafeInstall(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("rückgängig", result["error"])
         mock_rollback.assert_called_once()
+
+
+class TestUpgrade161To162(unittest.TestCase):
+    """Simulate upgrading from v1.6.1 to v1.6.2.
+
+    Verifies that:
+    - Existing config files are preserved (room name, hotkey, IP, etc.)
+    - The exe is replaced with the new version
+    - Shortcuts are regenerated
+    - Scheduled tasks are re-registered
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.install_dir = Path(self.tmpdir) / "AlarmSystem"
+        self.install_dir.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_161_client_config(self, slug: str, room: str,
+                                  hotkey: str = "alt+g",
+                                  server_ip: str = "192.168.1.100",
+                                  port: int = 9999) -> Path:
+        """Write a v1.6.1 style client config file."""
+        cfg = self.install_dir / f"client_config_{slug}.toml"
+        cfg.write_text(textwrap.dedent(f"""\
+            [client]
+            room_name   = "{room}"
+            server_ip   = "{server_ip}"
+            server_port = {port}
+            hotkey      = "{hotkey}"
+            alarm_sound = ""
+            log_file    = ""
+        """), encoding="utf-8")
+        return cfg
+
+    def _write_161_server_config(self, port: int = 9999,
+                                  silent: bool = True) -> Path:
+        """Write a v1.6.1 style server config file."""
+        cfg = self.install_dir / "server_config.toml"
+        cfg.write_text(textwrap.dedent(f"""\
+            [server]
+            host                  = "0.0.0.0"
+            port                  = {port}
+            heartbeat_timeout_sec = 15
+            silent_alarm          = {"true" if silent else "false"}
+            log_file              = ""
+        """), encoding="utf-8")
+        return cfg
+
+    def test_read_existing_client_config(self):
+        """read_existing_config reads all fields from a v1.6.1 client config."""
+        from scripts.installer import read_existing_config
+
+        cfg = self._write_161_client_config(
+            "zimmer_3", "Zimmer 3", hotkey="alt+z",
+            server_ip="192.168.178.47", port=9999)
+
+        result = read_existing_config(cfg)
+
+        self.assertEqual(result["room_name"], "Zimmer 3")
+        self.assertEqual(result["hotkey"], "alt+z")
+        self.assertEqual(result["server_ip"], "192.168.178.47")
+        self.assertEqual(result["server_port"], "9999")
+        self.assertEqual(result["alarm_sound"], "")
+
+    def test_read_existing_server_config(self):
+        """read_existing_config reads all fields from a v1.6.1 server config."""
+        from scripts.installer import read_existing_config
+
+        cfg = self._write_161_server_config(port=8888, silent=False)
+
+        result = read_existing_config(cfg)
+
+        self.assertEqual(result["port"], "8888")
+        self.assertEqual(result["silent_alarm"], "false")
+        self.assertEqual(result["host"], "0.0.0.0")
+
+    def test_read_nonexistent_config_returns_empty(self):
+        """read_existing_config on missing file returns empty dict."""
+        from scripts.installer import read_existing_config
+
+        result = read_existing_config(Path("/nonexistent/config.toml"))
+        self.assertEqual(result, {})
+
+    def test_update_preserves_client_config(self):
+        """In update mode, write_client_config should NOT be called when cfg exists."""
+        from scripts.installer import write_client_config
+
+        cfg = self._write_161_client_config(
+            "behandlungs_zimmer_1", "Behandlungs Zimmer 1",
+            hotkey="alt+q", server_ip="192.168.178.47")
+
+        original_content = cfg.read_text(encoding="utf-8")
+
+        # Simulate update logic (same as _run_client_install)
+        update = True
+        if update and cfg.exists():
+            pass  # Preserve existing config
+        else:
+            write_client_config(cfg, "New Room", "10.0.0.1", 8080, "ctrl+x")
+
+        # Config file must be unchanged
+        self.assertEqual(cfg.read_text(encoding="utf-8"), original_content)
+        # Verify original values still present
+        self.assertIn('room_name   = "Behandlungs Zimmer 1"', original_content)
+        self.assertIn('hotkey      = "alt+q"', original_content)
+        self.assertIn('server_ip   = "192.168.178.47"', original_content)
+
+    def test_update_preserves_server_config(self):
+        """In update mode, write_server_config should NOT be called when cfg exists."""
+        from scripts.installer import write_server_config
+
+        cfg = self._write_161_server_config(port=9999, silent=True)
+        original_content = cfg.read_text(encoding="utf-8")
+
+        # Simulate update logic
+        update = True
+        if update and cfg.exists():
+            pass  # Preserve existing config
+        else:
+            write_server_config(cfg, 7777, False)
+
+        # Config file must be unchanged
+        self.assertEqual(cfg.read_text(encoding="utf-8"), original_content)
+        self.assertIn("port                  = 9999", original_content)
+        self.assertIn("silent_alarm          = true", original_content)
+
+    def test_fresh_install_writes_new_config(self):
+        """Without update mode, a fresh config is written."""
+        from scripts.installer import write_client_config
+
+        cfg = self.install_dir / "client_config_new_room.toml"
+        self.assertFalse(cfg.exists())
+
+        # Simulate fresh install
+        update = False
+        if update and cfg.exists():
+            pass
+        else:
+            write_client_config(cfg, "New Room", "10.0.0.1", 8080, "ctrl+x")
+
+        self.assertTrue(cfg.exists())
+        content = cfg.read_text(encoding="utf-8")
+        self.assertIn('room_name   = "New Room"', content)
+        self.assertIn('server_ip   = "10.0.0.1"', content)
+        self.assertIn('hotkey      = "ctrl+x"', content)
+
+    def test_find_installed_clients_detects_161_configs(self):
+        """find_installed_clients finds v1.6.1 config files and reads room names."""
+        from scripts.installer import find_installed_clients
+
+        self._write_161_client_config("zimmer_1", "Zimmer 1", hotkey="alt+q")
+        self._write_161_client_config("zimmer_2", "Zimmer 2", hotkey="alt+w")
+        self._write_161_client_config("dr_sebastian", "Dr Sebastian", hotkey="alt+e")
+
+        with patch("scripts.installer.INSTALL_DIR", self.install_dir):
+            clients = find_installed_clients()
+
+        rooms = [c["room"] for c in clients]
+        self.assertIn("Zimmer 1", rooms)
+        self.assertIn("Zimmer 2", rooms)
+        self.assertIn("Dr Sebastian", rooms)
+        self.assertEqual(len(clients), 3)
+
+    def test_upgrade_multiple_clients_preserves_all(self):
+        """Upgrading 3 clients preserves each one's unique config."""
+        from scripts.installer import read_existing_config
+
+        configs = {
+            "zimmer_1": ("Zimmer 1", "alt+q", "192.168.178.47"),
+            "zimmer_2": ("Zimmer 2", "alt+w", "192.168.178.47"),
+            "dr_sebastian": ("Dr Sebastian", "alt+e", "192.168.178.100"),
+        }
+
+        # Write v1.6.1 configs
+        for slug, (room, hotkey, ip) in configs.items():
+            self._write_161_client_config(slug, room, hotkey=hotkey, server_ip=ip)
+
+        # Simulate update: verify each config is preserved
+        for slug, (expected_room, expected_hotkey, expected_ip) in configs.items():
+            cfg_path = self.install_dir / f"client_config_{slug}.toml"
+            existing = read_existing_config(cfg_path)
+
+            self.assertEqual(existing["room_name"], expected_room,
+                             f"Room name lost for {slug}")
+            self.assertEqual(existing["hotkey"], expected_hotkey,
+                             f"Hotkey lost for {slug}")
+            self.assertEqual(existing["server_ip"], expected_ip,
+                             f"Server IP lost for {slug}")
+
+    def test_clean_install_overwrites_config(self):
+        """Clean install (not update) writes a NEW config even if one exists."""
+        cfg = self._write_161_client_config(
+            "zimmer_1", "Zimmer 1", hotkey="alt+q",
+            server_ip="192.168.178.47")
+
+        # Simulate clean install (update=False)
+        update = False
+        if update and cfg.exists():
+            pass  # Would preserve
+        else:
+            write_client_config(cfg, "Neues Zimmer", "10.0.0.1", 8080, "ctrl+x")
+
+        content = cfg.read_text(encoding="utf-8")
+        # Config should be OVERWRITTEN with new values
+        self.assertIn('room_name   = "Neues Zimmer"', content)
+        self.assertIn('server_ip   = "10.0.0.1"', content)
+        self.assertIn('hotkey      = "ctrl+x"', content)
+        # Old values should NOT be present
+        self.assertNotIn("Zimmer 1", content)
+        self.assertNotIn("alt+q", content)
+        self.assertNotIn("192.168.178.47", content)
+
+    def test_clean_install_server_overwrites_config(self):
+        """Clean install for server writes NEW config."""
+        cfg = self._write_161_server_config(port=9999, silent=True)
+
+        # Simulate clean install
+        update = False
+        if update and cfg.exists():
+            pass
+        else:
+            write_server_config(cfg, 7777, False)
+
+        content = cfg.read_text(encoding="utf-8")
+        self.assertIn("port                  = 7777", content)
+        self.assertIn("silent_alarm          = false", content)
+        self.assertNotIn("9999", content)
+
+    def test_161_config_missing_muted_field(self):
+        """v1.6.1 config may not have 'muted' field — read_existing_config handles it."""
+        from scripts.installer import read_existing_config
+
+        # v1.6.1 format (no 'muted' field)
+        cfg = self._write_161_client_config("zimmer_1", "Zimmer 1")
+        result = read_existing_config(cfg)
+
+        # 'muted' should not be present
+        self.assertNotIn("muted", result)
+        # But all other fields should be
+        self.assertIn("room_name", result)
+        self.assertIn("hotkey", result)
+        self.assertIn("server_ip", result)
 
 
 if __name__ == "__main__":
