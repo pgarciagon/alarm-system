@@ -64,16 +64,15 @@ Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen
 Support: github.com/pgarciagon/alarm-system
 EOF
 
-# Calculate size (app + overhead)
+# Calculate size (app + 30% overhead for HFS+ metadata and staging extras)
 APP_SIZE_KB=$(du -sk "${APP_SRC}" | awk '{print $1}')
-DMG_SIZE_KB=$(( APP_SIZE_KB + 4096 ))   # +4 MB headroom
+DMG_SIZE_KB=$(( APP_SIZE_KB * 13 / 10 + 8192 ))   # 130% + 8 MB headroom
 
 echo "--- Creating DMG (size: ~${DMG_SIZE_KB} KB) ---"
 hdiutil create \
     -srcfolder "${DMG_TMP}" \
     -volname "${VOLUME_NAME}" \
     -fs HFS+ \
-    -fsargs "-c c=16,a=16,b=16" \
     -format UDRW \
     -size "${DMG_SIZE_KB}k" \
     "/tmp/${APP_NAME}_rw_$$.dmg"

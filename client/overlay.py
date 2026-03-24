@@ -46,6 +46,53 @@ def _make_btn(parent, text, bg, fg, command, font=("Arial", 9), padx=10, pady=2,
     return canvas
 
 
+class _CanvasButton(tk.Canvas):
+    """Canvas-based button with dynamic .config(text=, bg=) support for macOS."""
+
+    def __init__(self, parent, text, bg, fg, font, padx, pady, command):
+        self._cbtn_text = text
+        self._cbtn_bg   = bg
+        self._cbtn_fg   = fg
+        self._cbtn_font = font
+        self._cbtn_padx = padx
+        self._cbtn_pady = pady
+        w, h = self._measure(parent, text, font, padx, pady)
+        super().__init__(parent, bg=bg, width=w, height=h,
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self._txt_id = self.create_text(w // 2, h // 2, text=text,
+                                        font=font, fill=fg, anchor="center")
+        self.bind("<Button-1>", lambda _e: command())
+        self.bind("<Enter>",    lambda _e: super(_CanvasButton, self).config(bg=_darken(self._cbtn_bg)))
+        self.bind("<Leave>",    lambda _e: super(_CanvasButton, self).config(bg=self._cbtn_bg))
+
+    @staticmethod
+    def _measure(parent, text, font, padx, pady):
+        p = tk.Label(parent, text=text, font=font)
+        p.update_idletasks()
+        w, h = p.winfo_reqwidth() + padx * 2, p.winfo_reqheight() + pady * 2
+        p.destroy()
+        return w, h
+
+    def config(self, text=None, bg=None, **kw):  # type: ignore[override]
+        if text is not None:
+            self._cbtn_text = text
+            w, h = self._measure(self.master, text, self._cbtn_font,
+                                 self._cbtn_padx, self._cbtn_pady)
+            super().config(width=w, height=h)
+            self.coords(self._txt_id, w // 2, h // 2)
+            self.itemconfig(self._txt_id, text=text)
+        if bg is not None:
+            self._cbtn_bg = bg
+            super().config(bg=bg)
+        if kw:
+            super().config(**kw)
+
+    def cget(self, key):  # type: ignore[override]
+        if key == "bg":
+            return self._cbtn_bg
+        return super().cget(key)
+
+
 def _darken(hex_color: str) -> str:
     """Return a slightly darker shade of a hex colour for hover effect."""
     hex_color = hex_color.lstrip("#")
@@ -643,7 +690,7 @@ class OverlayManager:
         title_row.pack(fill="x", padx=10)
 
         self._room_name_label = tk.Label(
-            title_row, text=f"Raum: {self._room_name}",
+            title_row, text=self._room_name,
             font=("Arial", 12, "bold"), bg=self._ST_HEADER_BG, fg=self._ST_FG,
             cursor="hand2",
         )
@@ -663,7 +710,7 @@ class OverlayManager:
         _make_btn(
             title_row, text="Einstellungen", bg="#1a3a5c", fg=self._ST_FG,
             command=self._toggle_settings_panel,
-            font=("Arial", 9), padx=6, pady=2,
+            font=("Arial", 9), padx=10, pady=2,
         ).pack(side="right", padx=(0, 4))
 
         # Initialize settings state (used by settings dialog)
@@ -675,11 +722,10 @@ class OverlayManager:
         alarm_row.pack(fill="x", padx=10, pady=(4, 0))
 
         hotkey_display = self._hotkey.upper() if self._hotkey else ""
-        self._alarm_btn = tk.Button(
+        self._alarm_btn = _CanvasButton(
             alarm_row, text=f"ALARM AUSLÖSEN!\n({hotkey_display})",
             font=("Arial", 11, "bold"), bg="#CC0000", fg="white",
-            activebackground="#990000", activeforeground="white",
-            relief="flat", padx=15, pady=4,
+            padx=15, pady=4,
             command=self._on_alarm_btn_click,
         )
         self._alarm_btn.pack(side="left")
@@ -695,7 +741,29 @@ class OverlayManager:
         # Separator
         tk.Frame(win, bg="#333333", height=1).pack(fill="x")
 
-        # Scrollable client list area (canvas + scrollbar like server dashboard)
+        # Footer (count + version) — packed BEFORE expand=True container so it
+        # is always visible even when the window is resized to minimum height.
+        footer_row = tk.Frame(win, bg=self._ST_BG)
+        footer_row.pack(fill="x", side="bottom")
+        self._status_footer = tk.Label(
+            footer_row, text="", font=("Arial", 9), bg=self._ST_BG, fg="#888888",
+            anchor="w", padx=10, pady=4,
+        )
+        self._status_footer.pack(side="left")
+        tk.Label(
+            footer_row, text=f"v{__version__}", font=("Arial", 8),
+            bg=self._ST_BG, fg="#555555", anchor="e", padx=10,
+        ).pack(side="right")
+
+        # Section label above client list
+        tk.Label(
+            win,
+            text="Alarm wird an folgende online Räume gesendet:",
+            font=("Arial", 9), bg=self._ST_BG, fg="#888888",
+            anchor="w", padx=10,
+        ).pack(fill="x", pady=(6, 0))
+
+        # Scrollable client list — packed AFTER footer so footer is never squeezed out
         container = tk.Frame(win, bg=self._ST_BG)
         container.pack(fill="both", expand=True, padx=10, pady=(8, 4))
 
@@ -717,24 +785,9 @@ class OverlayManager:
         self._status_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._status_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Mouse wheel scrolling
         def _on_mousewheel(event):
-            self._status_canvas.yview_scroll(
-                int(-1 * (event.delta / 120)), "units")
+            self._status_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         self._status_canvas.bind_all("<MouseWheel>", _on_mousewheel)
-
-        # Footer (count + version)
-        footer_row = tk.Frame(win, bg=self._ST_BG)
-        footer_row.pack(fill="x", side="bottom")
-        self._status_footer = tk.Label(
-            footer_row, text="", font=("Arial", 9), bg=self._ST_BG, fg="#888888",
-            anchor="w", padx=10, pady=4,
-        )
-        self._status_footer.pack(side="left")
-        tk.Label(
-            footer_row, text=f"v{__version__}", font=("Arial", 8),
-            bg=self._ST_BG, fg="#555555", anchor="e", padx=10,
-        ).pack(side="right")
 
         self._status_win = win
 
@@ -763,7 +816,7 @@ class OverlayManager:
     def _refresh_room_name_label(self) -> None:
         """Update the room name label text."""
         if self._room_name_label and self._room_name_label.winfo_exists():
-            self._room_name_label.config(text=f"Raum: {self._room_name}")
+            self._room_name_label.config(text=self._room_name)
 
     # ------------------------------------------------------------------
     # Mute toggle
@@ -1223,7 +1276,7 @@ class OverlayManager:
             return
 
         online_count = 0
-        for c in sorted(others, key=lambda x: x.get("room", "")):
+        for c in sorted(others, key=lambda x: (x.get("is_down", False), x.get("room", ""))):
             room = c.get("room", "?")
             is_down = c.get("is_down", False)
             if not is_down:
