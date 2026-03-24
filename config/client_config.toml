@@ -2,7 +2,7 @@
 room_name   = "Room-70623"
 server_ip   = "192.168.178.47"
 server_port = 9999
-hotkey      = "cmd+n"
+hotkey      = "ctrl+a"
 alarm_sound = ""
 log_file    = ""
 muted       = false

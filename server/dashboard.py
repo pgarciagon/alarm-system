@@ -131,7 +131,7 @@ class ServerDashboard:
         ).pack(side=tk.LEFT, padx=(8, 0))
 
         _make_btn(
-            title_row, text="Beenden", bg=_RED, fg="white",
+            title_row, text="Beenden", bg="#3a3a4a", fg="#cccccc",
             command=self._exit,
         ).pack(side=tk.RIGHT, padx=(4, 0))
 
