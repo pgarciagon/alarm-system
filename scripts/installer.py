@@ -28,6 +28,12 @@ import textwrap
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
+
+# Import version
+try:
+    from common.version import __version__
+except ImportError:
+    __version__ = "unknown"
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -153,6 +159,21 @@ def register_task(task_name: str, exe: Path, role: str, config_path: Path) -> bo
 
 
 def start_task(task_name: str) -> None:
+    """Start the scheduled task, but only if the process isn't already running."""
+    # Determine exe name from task name
+    if "Server" in task_name:
+        exe_name = "alarm_server.exe"
+    else:
+        exe_name = "alarm_client.exe"
+
+    # Check if already running
+    try:
+        r = subprocess.run(["tasklist"], capture_output=True, text=True)
+        if exe_name.lower() in (r.stdout or "").lower():
+            return  # Already running — skip
+    except Exception:
+        pass
+
     subprocess.run(["schtasks", "/Run", "/TN", task_name], capture_output=True)
 
 
@@ -242,6 +263,29 @@ def create_shortcuts(exe: Path, role: str, config_path: Path,
     else:
         startmenu_ok = False
 
+    # Uninstaller shortcut (only create once — check if it exists)
+    uninstall_lnk = desktop / "Alarmsystem deinstallieren.lnk"
+    if not uninstall_lnk.exists():
+        if getattr(sys, "frozen", False):
+            uninst_target = INSTALL_DIR / "alarm_installer.exe"
+            # Copy installer to install dir if not there yet
+            if not uninst_target.exists():
+                try:
+                    shutil.copy2(sys.executable, uninst_target)
+                except Exception:
+                    pass
+            uninst_args = "--uninstall"
+        else:
+            uninst_target = target  # reuse python/pythonw
+            uninst_args = f"-m scripts.installer --uninstall"
+
+        ico_uninst = INSTALL_DIR / "alarm.ico"
+        _create_shortcut(
+            uninstall_lnk, uninst_target, uninst_args,
+            "Alarmsystem deinstallieren",
+            icon_path=ico_uninst if ico_uninst.exists() else None,
+        )
+
     return desktop_ok, startmenu_ok
 
 
@@ -271,6 +315,599 @@ def write_client_config(path: Path, room: str, server_ip: str,
         alarm_sound = ""
         log_file    = ""
     """), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Pre-install detection & cleanup helpers
+# ---------------------------------------------------------------------------
+
+def detect_existing_installation(role: str, room_slug: str = "") -> dict:
+    """Check whether a previous installation exists for the given role.
+
+    Returns a dict with keys:
+      exe_exists      – True if the exe is already in INSTALL_DIR
+      task_exists      – True if a matching Task Scheduler entry exists
+      task_name        – the name of the found task (or None)
+      process_running  – True if the exe is currently running
+    """
+    exe_name = "alarm_server.exe" if role == "server" else "alarm_client.exe"
+    exe_path = INSTALL_DIR / exe_name
+
+    # Check exe on disk
+    exe_exists = exe_path.exists()
+
+    # Check Task Scheduler
+    if role == "server":
+        task_candidates = [TASK_SERVER]
+    else:
+        task_candidates = []
+        if room_slug:
+            task_candidates.append(f"{TASK_CLIENT}_{room_slug}")
+        task_candidates.append(TASK_CLIENT)
+
+    task_name = None
+    task_exists = False
+    for tn in task_candidates:
+        r = subprocess.run(["schtasks", "/Query", "/TN", tn],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            task_exists = True
+            task_name = tn
+            break
+
+    # Check running process
+    process_running = False
+    try:
+        r = subprocess.run(["tasklist"], capture_output=True, text=True)
+        stdout = r.stdout or ""
+        process_running = exe_name.lower() in stdout.lower()
+    except Exception:
+        pass
+
+    return {
+        "exe_exists": exe_exists,
+        "task_exists": task_exists,
+        "task_name": task_name,
+        "process_running": process_running,
+    }
+
+
+def cleanup_existing(role: str, room_slug: str = "") -> None:
+    """Stop running processes, remove old task, and delete old shortcuts."""
+    exe_name = "alarm_server.exe" if role == "server" else "alarm_client.exe"
+
+    # Kill running process — for clients, only stop via scheduled task
+    # to avoid killing OTHER clients. For server, kill by image name.
+    if role == "server":
+        try:
+            subprocess.run(["taskkill", "/IM", exe_name, "/F"],
+                           capture_output=True, text=True, timeout=10)
+        except Exception:
+            pass
+    else:
+        # Stop only this client's scheduled task (does not affect others)
+        task_name = f"{TASK_CLIENT}_{room_slug}" if room_slug else TASK_CLIENT
+        try:
+            subprocess.run(["schtasks", "/End", "/TN", task_name],
+                           capture_output=True, text=True, timeout=10)
+        except Exception:
+            pass
+
+    # Delete scheduled task(s)
+    if role == "server":
+        task_candidates = [TASK_SERVER]
+    else:
+        task_candidates = []
+        if room_slug:
+            task_candidates.append(f"{TASK_CLIENT}_{room_slug}")
+        task_candidates.append(TASK_CLIENT)
+
+    for tn in task_candidates:
+        subprocess.run(["schtasks", "/Delete", "/TN", tn, "/F"],
+                       capture_output=True, text=True)
+
+    # Also clean orphan tasks for this role
+    for orphan in find_orphan_tasks():
+        subprocess.run(["schtasks", "/Delete", "/TN", orphan, "/F"],
+                       capture_output=True, text=True)
+
+
+def find_orphan_tasks() -> list:
+    """Find AlarmSystem_ tasks whose target exe no longer exists."""
+    orphans = []
+    try:
+        r = subprocess.run(
+            ["schtasks", "/Query", "/FO", "CSV", "/V"],
+            capture_output=True, text=True,
+        )
+        stdout = r.stdout or ""
+        for line in stdout.splitlines():
+            if "AlarmSystem_" not in line:
+                continue
+            # CSV fields: "hostname","task_name","next_run",...,"task_to_run",...
+            parts = line.split('","')
+            if len(parts) < 9:
+                continue
+            task_name = parts[1].strip('"').strip("\\")
+            # Field index 8 is typically "Task To Run"
+            exe_field = parts[8].strip('"') if len(parts) > 8 else ""
+            if exe_field and not Path(exe_field).exists():
+                orphans.append(task_name)
+    except Exception:
+        pass
+    return orphans
+
+
+def verify_autostart(task_name: str) -> bool:
+    """After installation, verify the scheduled task is correctly configured.
+
+    Checks:
+      1. Task exists and is enabled
+      2. The exe it points to actually exists
+    Returns True if everything is OK.
+    """
+    r = subprocess.run(
+        ["schtasks", "/Query", "/TN", task_name, "/V", "/FO", "LIST"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return False
+
+    stdout = r.stdout or ""
+    # Check enabled
+    enabled = True
+    for line in stdout.splitlines():
+        low = line.lower().strip()
+        if "status des geplanten tasks" in low or "scheduled task state" in low:
+            if "deaktiviert" in low or "disabled" in low:
+                enabled = False
+            break
+
+    return enabled
+
+
+# ---------------------------------------------------------------------------
+# Uninstaller helpers
+# ---------------------------------------------------------------------------
+
+def find_installed_clients() -> list[dict]:
+    """Find all installed client configs, shortcuts and scheduled tasks.
+
+    Returns a list of dicts: [{"slug": "zimmer_1", "room": "Zimmer 1", "config": Path|None}, ...]
+    """
+    seen_slugs: set[str] = set()
+    clients: list[dict] = []
+
+    # 1. Config files in INSTALL_DIR: client_config_*.toml
+    if INSTALL_DIR.exists():
+        for cfg_file in sorted(INSTALL_DIR.glob("client_config_*.toml")):
+            slug = cfg_file.stem.replace("client_config_", "")
+            room = slug
+            try:
+                text = cfg_file.read_text(encoding="utf-8")
+                for line in text.splitlines():
+                    if line.strip().startswith("room_name"):
+                        room = line.split("=", 1)[1].strip().strip('"')
+                        break
+            except Exception:
+                pass
+            if slug not in seen_slugs:
+                seen_slugs.add(slug)
+                clients.append({"slug": slug, "room": room, "config": cfg_file})
+
+        # Also check generic client_config.toml (no suffix)
+        generic = INSTALL_DIR / "client_config.toml"
+        if generic.exists():
+            room = "Client"
+            try:
+                text = generic.read_text(encoding="utf-8")
+                for line in text.splitlines():
+                    if line.strip().startswith("room_name"):
+                        room = line.split("=", 1)[1].strip().strip('"')
+                        break
+            except Exception:
+                pass
+            slug = room.lower().replace(" ", "_")
+            if slug not in seen_slugs:
+                seen_slugs.add(slug)
+                clients.append({"slug": slug, "room": room, "config": generic})
+
+    # 2. Desktop shortcuts matching "Alarm Client*"
+    desktop = Path(os.environ.get("USERPROFILE", "")) / "Desktop"
+    if desktop.exists():
+        for lnk in desktop.glob("Alarm Client*.lnk"):
+            # Extract room name from shortcut name: "Alarm Client — Room Name.lnk"
+            name = lnk.stem
+            for sep in (" — ", " - "):
+                if sep in name:
+                    room = name.split(sep, 1)[1].strip()
+                    break
+            else:
+                room = "Client"
+            slug = room.lower().replace(" ", "_")
+            if slug not in seen_slugs:
+                seen_slugs.add(slug)
+                cfg_path = INSTALL_DIR / f"client_config_{slug}.toml"
+                clients.append({
+                    "slug": slug, "room": room,
+                    "config": cfg_path if cfg_path.exists() else None,
+                })
+
+    # 3. Scheduled tasks matching AlarmSystem_Client_*
+    try:
+        r = subprocess.run(
+            ["schtasks", "/Query", "/FO", "LIST"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.stdout:
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("TaskName:") and "AlarmSystem_Client_" in line:
+                    task = line.split("\\")[-1].strip()
+                    slug = task.replace("AlarmSystem_Client_", "")
+                    room = slug.replace("_", " ").title()
+                    if slug not in seen_slugs:
+                        seen_slugs.add(slug)
+                        cfg_path = INSTALL_DIR / f"client_config_{slug}.toml"
+                        clients.append({
+                            "slug": slug, "room": room,
+                            "config": cfg_path if cfg_path.exists() else None,
+                        })
+    except Exception:
+        pass
+
+    return clients
+
+
+def is_server_installed() -> bool:
+    """Return True if the server is installed."""
+    return (INSTALL_DIR / "alarm_server.exe").exists() or \
+           (INSTALL_DIR / "server_config.toml").exists()
+
+
+def uninstall(role: str, room_slug: str = "") -> list[str]:
+    """Uninstall a role completely. Returns a list of actions taken."""
+    log = _get_install_logger()
+    actions = []
+    exe_name = "alarm_server.exe" if role == "server" else "alarm_client.exe"
+
+    # 1. Kill process
+    try:
+        r = subprocess.run(["taskkill", "/IM", exe_name, "/F"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            actions.append(f"Prozess {exe_name} beendet")
+            log.info("Uninstall: killed %s", exe_name)
+    except Exception:
+        pass
+
+    # 2. Delete scheduled task(s)
+    if role == "server":
+        task_names = [TASK_SERVER]
+    else:
+        task_names = []
+        if room_slug:
+            task_names.append(f"{TASK_CLIENT}_{room_slug}")
+        task_names.append(TASK_CLIENT)
+
+    for tn in task_names:
+        r = subprocess.run(["schtasks", "/Delete", "/TN", tn, "/F"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            actions.append(f"Aufgabe {tn} entfernt")
+            log.info("Uninstall: deleted task %s", tn)
+
+    # 3. Delete shortcuts
+    desktop = Path(os.environ.get("USERPROFILE", "C:\\Users\\Public")) / "Desktop"
+    start_menu = (
+        Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows"
+        / "Start Menu" / "Programs"
+    )
+    if role == "server":
+        shortcut_names = ["Alarm Server.lnk"]
+    else:
+        shortcut_names = [f"Alarm Client — {room_slug}.lnk",
+                          "Alarm Client.lnk"]
+
+    for folder in [desktop, start_menu]:
+        for name in shortcut_names:
+            lnk = folder / name
+            if lnk.exists():
+                try:
+                    lnk.unlink()
+                    actions.append(f"Verknüpfung {lnk.name} entfernt")
+                    log.info("Uninstall: deleted shortcut %s", lnk)
+                except Exception:
+                    pass
+
+    # 4. Delete config file
+    if role == "server":
+        cfg_path = INSTALL_DIR / "server_config.toml"
+    else:
+        cfg_path = INSTALL_DIR / f"client_config_{room_slug}.toml"
+
+    if cfg_path.exists():
+        try:
+            cfg_path.unlink()
+            actions.append(f"Konfiguration {cfg_path.name} entfernt")
+            log.info("Uninstall: deleted config %s", cfg_path)
+        except Exception:
+            pass
+
+    # 5. Delete exe (only if the other role doesn't need it)
+    exe_path = INSTALL_DIR / exe_name
+    other_exe = "alarm_client.exe" if role == "server" else "alarm_server.exe"
+    if exe_path.exists():
+        # Check if other role still needs the install dir
+        other_exists = (INSTALL_DIR / other_exe).exists()
+        other_configs = list(INSTALL_DIR.glob("client_config_*.toml")) if role == "server" else []
+        if role == "client":
+            other_configs = [INSTALL_DIR / "server_config.toml"] if (INSTALL_DIR / "server_config.toml").exists() else []
+            other_configs += [f for f in INSTALL_DIR.glob("client_config_*.toml") if f != cfg_path]
+
+        try:
+            exe_path.unlink()
+            actions.append(f"Programm {exe_name} entfernt")
+            log.info("Uninstall: deleted exe %s", exe_path)
+        except Exception:
+            pass
+
+    # 6. Clean up if install dir is empty (no more configs or exes)
+    remaining = list(INSTALL_DIR.glob("*.exe")) + list(INSTALL_DIR.glob("*.toml"))
+    if not remaining and INSTALL_DIR.exists():
+        try:
+            shutil.rmtree(INSTALL_DIR)
+            actions.append(f"Ordner {INSTALL_DIR} entfernt")
+            log.info("Uninstall: removed install dir %s", INSTALL_DIR)
+        except Exception:
+            pass
+
+        # Also remove uninstaller shortcut
+        for folder in [desktop, start_menu]:
+            lnk = folder / "Alarmsystem deinstallieren.lnk"
+            if lnk.exists():
+                try:
+                    lnk.unlink()
+                except Exception:
+                    pass
+
+    return actions
+
+
+# ---------------------------------------------------------------------------
+# Safe-install infrastructure (pre-flight, backup, rollback, logging)
+# ---------------------------------------------------------------------------
+
+import logging as _logging
+import time as _time
+
+_install_log: _logging.Logger | None = None
+
+
+def _get_install_logger() -> _logging.Logger:
+    """Return (and lazily create) a file logger for install actions."""
+    global _install_log
+    if _install_log is None:
+        _install_log = _logging.getLogger("alarm.installer")
+        _install_log.setLevel(_logging.DEBUG)
+        log_path = INSTALL_DIR / "install.log"
+        INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+        fh = _logging.FileHandler(str(log_path), encoding="utf-8")
+        fh.setFormatter(_logging.Formatter(
+            "%(asctime)s  %(levelname)-7s  %(message)s"))
+        _install_log.addHandler(fh)
+    return _install_log
+
+
+def preflight_checks() -> list[str]:
+    """Run pre-flight checks before touching the system.
+
+    Returns a list of error messages.  Empty list → all OK.
+    """
+    errors: list[str] = []
+
+    # 1. Verify we can write to INSTALL_DIR
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+    probe = INSTALL_DIR / ".install_probe"
+    try:
+        probe.write_text("probe", encoding="utf-8")
+        probe.unlink()
+    except PermissionError:
+        errors.append(
+            f"Keine Schreibrechte auf {INSTALL_DIR}. "
+            "Bitte als Administrator ausführen.")
+    except Exception as exc:
+        errors.append(f"Schreibtest fehlgeschlagen: {exc}")
+
+    # 2. Disk space (need at least 100 MB free)
+    try:
+        import shutil as _shutil
+        usage = _shutil.disk_usage(INSTALL_DIR)
+        free_mb = usage.free / (1024 * 1024)
+        if free_mb < 100:
+            errors.append(
+                f"Zu wenig Speicherplatz: {free_mb:.0f} MB frei "
+                f"(mindestens 100 MB erforderlich).")
+    except Exception:
+        pass  # non-critical
+
+    # 3. schtasks is available
+    try:
+        r = subprocess.run(["schtasks", "/Query", "/TN", "__install_probe__"],
+                           capture_output=True, text=True)
+        # returncode 1 is fine (task not found) — we just need the binary
+        if r.returncode not in (0, 1):
+            errors.append("schtasks ist nicht verfügbar oder blockiert.")
+    except FileNotFoundError:
+        errors.append("schtasks.exe wurde nicht gefunden.")
+    except Exception as exc:
+        errors.append(f"schtasks-Prüfung fehlgeschlagen: {exc}")
+
+    return errors
+
+
+def backup_existing(role: str, room_slug: str = "") -> dict:
+    """Create backups of existing files before overwriting.
+
+    Returns a dict describing what was backed up (used by rollback).
+    """
+    log = _get_install_logger()
+    ts = _time.strftime("%Y%m%d_%H%M%S")
+    backup_dir = INSTALL_DIR / "backups" / ts
+    backed_up: dict = {"backup_dir": str(backup_dir), "files": [], "task_xml": None}
+
+    exe_name = "alarm_server.exe" if role == "server" else "alarm_client.exe"
+    exe_path = INSTALL_DIR / exe_name
+
+    # Backup exe
+    if exe_path.exists():
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        dst = backup_dir / exe_name
+        try:
+            shutil.copy2(exe_path, dst)
+            backed_up["files"].append({"src": str(exe_path), "bak": str(dst)})
+            log.info("Backup: %s → %s", exe_path, dst)
+        except Exception as exc:
+            log.warning("Backup von %s fehlgeschlagen: %s", exe_path, exc)
+
+    # Backup config(s)
+    if role == "server":
+        cfg_candidates = [INSTALL_DIR / "server_config.toml"]
+    else:
+        cfg_candidates = list(INSTALL_DIR.glob(f"client_config_{room_slug}*.toml"))
+        cfg_candidates += list(INSTALL_DIR.glob("client_config.toml"))
+
+    for cfg_path in cfg_candidates:
+        if cfg_path.exists():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            dst = backup_dir / cfg_path.name
+            try:
+                shutil.copy2(cfg_path, dst)
+                backed_up["files"].append({"src": str(cfg_path), "bak": str(dst)})
+                log.info("Backup: %s → %s", cfg_path, dst)
+            except Exception as exc:
+                log.warning("Backup von %s fehlgeschlagen: %s", cfg_path, exc)
+
+    # Export current scheduled task to XML
+    if role == "server":
+        task_name = TASK_SERVER
+    else:
+        task_name = f"{TASK_CLIENT}_{room_slug}" if room_slug else TASK_CLIENT
+
+    try:
+        r = subprocess.run(
+            ["schtasks", "/Query", "/TN", task_name, "/XML"],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0 and r.stdout:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            xml_path = backup_dir / f"{task_name}.xml"
+            xml_path.write_text(r.stdout, encoding="utf-16")
+            backed_up["task_xml"] = str(xml_path)
+            backed_up["task_name"] = task_name
+            log.info("Backup: Scheduled task %s → %s", task_name, xml_path)
+    except Exception as exc:
+        log.warning("Task-Backup fehlgeschlagen: %s", exc)
+
+    return backed_up
+
+
+def rollback(backup_info: dict) -> None:
+    """Restore files and scheduled task from a backup created by backup_existing().
+
+    Called automatically when any installation step fails.
+    """
+    log = _get_install_logger()
+    log.warning("ROLLBACK gestartet — stelle vorherigen Zustand wieder her")
+
+    # Restore files
+    for entry in backup_info.get("files", []):
+        src = Path(entry["src"])
+        bak = Path(entry["bak"])
+        if bak.exists():
+            try:
+                shutil.copy2(bak, src)
+                log.info("Wiederhergestellt: %s ← %s", src, bak)
+            except Exception as exc:
+                log.error("Wiederherstellung fehlgeschlagen: %s — %s", src, exc)
+
+    # Restore scheduled task
+    xml_path = backup_info.get("task_xml")
+    task_name = backup_info.get("task_name")
+    if xml_path and task_name and Path(xml_path).exists():
+        try:
+            subprocess.run(
+                ["schtasks", "/Create", "/TN", task_name,
+                 "/XML", xml_path, "/F"],
+                capture_output=True, text=True,
+            )
+            log.info("Scheduled task %s wiederhergestellt", task_name)
+        except Exception as exc:
+            log.error("Task-Wiederherstellung fehlgeschlagen: %s", exc)
+
+    log.warning("ROLLBACK abgeschlossen")
+
+
+def safe_install(role: str, install_fn, room_slug: str = "") -> dict:
+    """Orchestrate a safe, transactional installation.
+
+    1. Pre-flight checks
+    2. Backup existing installation
+    3. Cleanup old processes / tasks
+    4. Run the actual install function
+    5. Verify autostart
+    6. Rollback on ANY failure
+
+    *install_fn* receives (backup_info) and must return a dict with
+    at least {task_ok, exe, desk_ok, start_ok, task_name}.
+    Raises on failure (triggering rollback).
+    """
+    log = _get_install_logger()
+    log.info("=" * 60)
+    log.info("Installation gestartet — Rolle: %s", role)
+
+    # Step 1: pre-flight
+    errors = preflight_checks()
+    if errors:
+        msg = "\n".join(f"• {e}" for e in errors)
+        log.error("Pre-flight fehlgeschlagen:\n%s", msg)
+        return {"ok": False, "error": f"Vorprüfung fehlgeschlagen:\n\n{msg}"}
+
+    log.info("Pre-flight checks bestanden")
+
+    # Step 2: backup
+    backup_info = backup_existing(role, room_slug)
+    log.info("Backup erstellt: %s", backup_info.get("backup_dir", "n/a"))
+
+    # Step 3: cleanup
+    try:
+        cleanup_existing(role, room_slug)
+        log.info("Alte Installation bereinigt")
+    except Exception as exc:
+        log.error("Bereinigung fehlgeschlagen: %s", exc)
+        rollback(backup_info)
+        return {"ok": False, "error": f"Bereinigung fehlgeschlagen: {exc}"}
+
+    # Step 4: run actual install
+    try:
+        result = install_fn(backup_info)
+        log.info("Installation ausgeführt")
+    except Exception as exc:
+        log.error("Installation fehlgeschlagen: %s — starte Rollback", exc)
+        rollback(backup_info)
+        return {"ok": False, "error": f"Installation fehlgeschlagen: {exc}\n\nAlle Änderungen wurden rückgängig gemacht."}
+
+    # Step 5: verify
+    task_name = result.get("task_name", "")
+    if task_name and not verify_autostart(task_name):
+        log.error("Autostart-Überprüfung fehlgeschlagen — starte Rollback")
+        rollback(backup_info)
+        return {"ok": False, "error": "Autostart konnte nicht verifiziert werden.\n\nAlle Änderungen wurden rückgängig gemacht."}
+
+    log.info("Autostart verifiziert: %s", task_name)
+    log.info("Installation erfolgreich abgeschlossen")
+    result["ok"] = True
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -366,9 +1003,30 @@ class InstallerApp(tk.Tk):
     _GREEN = "#00b894"
     _AMBER = "#fdcb6e"
 
-    def __init__(self) -> None:
+    @staticmethod
+    def _add_context_menu(entry: tk.Entry) -> None:
+        """Add right-click context menu (Cut/Copy/Paste/Select All) to an Entry."""
+        menu = tk.Menu(entry, tearoff=0)
+        menu.add_command(label="Ausschneiden", command=lambda: entry.event_generate("<<Cut>>"))
+        menu.add_command(label="Kopieren", command=lambda: entry.event_generate("<<Copy>>"))
+        menu.add_command(label="Einfügen", command=lambda: entry.event_generate("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(label="Alles auswählen",
+                         command=lambda: (entry.select_range(0, tk.END), entry.icursor(tk.END)))
+
+        def _show(event):
+            menu.tk_popup(event.x_root, event.y_root)
+        entry.bind("<Button-3>", _show)
+        # Mac trackpad / Control+click
+        entry.bind("<Button-2>", _show)
+
+    def __init__(self, dev_mode: bool = False) -> None:
         super().__init__()
-        self.title("Alarmsystem — Installation")
+        self._dev_mode = dev_mode
+        title = f"Alarmsystem — Installation  v{__version__}"
+        if dev_mode:
+            title += "  [DEV MODE]"
+        self.title(title)
         self.resizable(False, False)
         self.configure(bg=self._BG)
         self._center(620, 520)
@@ -388,7 +1046,7 @@ class InstallerApp(tk.Tk):
     def _build_role_page(self) -> None:
         self._clear()
 
-        tk.Label(self, text="Alarmsystem Installation",
+        tk.Label(self, text=f"Alarmsystem Installation  v{__version__}",
                  font=("Arial", 20, "bold"), bg=self._BG, fg=self._ACCENT).pack(pady=(30, 5))
         tk.Label(self, text="Wählen Sie die Rolle dieses PCs:",
                  font=("Arial", 13), bg=self._BG, fg=self._FG).pack(pady=(0, 25))
@@ -645,19 +1303,38 @@ class InstallerApp(tk.Tk):
             messagebox.showerror("Fehler", "Ungültiger Port.")
             return
 
-        self._show_progress("Server wird installiert…")
+        # Check for existing installation
+        info = detect_existing_installation("server")
+        if info["exe_exists"] or info["task_exists"] or info["process_running"]:
+            self._show_overwrite_dialog("server", info,
+                                        on_confirm=lambda: self._run_server_install(port))
+            return
+
+        self._run_server_install(port)
+
+    def _run_server_install(self, port: int) -> None:
+        self._show_progress("Server wird installiert…\n\n"
+                            "Vorprüfung → Backup → Installation → Überprüfung")
+
+        silent = self._silent_var.get()
+
+        def _install_fn(_backup_info):
+            exe = _copy_exe("server", INSTALL_DIR)
+            cfg = INSTALL_DIR / "server_config.toml"
+            write_server_config(cfg, port, silent)
+            task_ok = register_task(TASK_SERVER, exe, "server", cfg)
+            desk_ok, start_ok = create_shortcuts(exe, "server", cfg)
+            return {"task_ok": task_ok, "exe": exe, "desk_ok": desk_ok,
+                    "start_ok": start_ok, "task_name": TASK_SERVER}
 
         def _worker():
-            try:
-                exe = _copy_exe("server", INSTALL_DIR)
-                cfg = INSTALL_DIR / "server_config.toml"
-                write_server_config(cfg, port, self._silent_var.get())
-                task_ok = register_task(TASK_SERVER, exe, "server", cfg)
-                desk_ok, start_ok = create_shortcuts(exe, "server", cfg)
-                self.after(0, lambda: self._finish(task_ok, "server", exe,
-                                                    desk_ok, start_ok))
-            except Exception as exc:
-                self.after(0, lambda: self._error(str(exc)))
+            result = safe_install("server", _install_fn)
+            if result["ok"]:
+                self.after(0, lambda: self._finish(
+                    result["task_ok"], "server", result["exe"],
+                    result["desk_ok"], result["start_ok"]))
+            else:
+                self.after(0, lambda: self._error(result["error"]))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -678,25 +1355,89 @@ class InstallerApp(tk.Tk):
             messagebox.showerror("Fehler", "Bitte Server-IP eingeben.")
             return
 
-        self._show_progress("Client wird installiert…")
+        slug = _sanitize_name(room)
+
+        # Check for existing installation (skip in dev mode)
+        if not self._dev_mode:
+            info = detect_existing_installation("client", slug)
+            if info["exe_exists"] or info["task_exists"] or info["process_running"]:
+                self._show_overwrite_dialog("client", info,
+                                            on_confirm=lambda: self._run_client_install(
+                                                room, sip, port, hotkey, slug))
+                return
+
+        self._run_client_install(room, sip, port, hotkey, slug)
+
+    def _run_client_install(self, room: str, sip: str, port: int,
+                            hotkey: str, slug: str) -> None:
+        self._show_progress("Client wird installiert…\n\n"
+                            "Vorprüfung → Backup → Installation → Überprüfung")
+
+        def _install_fn(_backup_info):
+            exe = _copy_exe("client", INSTALL_DIR)
+            cfg = INSTALL_DIR / f"client_config_{slug}.toml"
+            write_client_config(cfg, room, sip, port, hotkey)
+            task_name = f"{TASK_CLIENT}_{slug}"
+            task_ok = register_task(task_name, exe, "client", cfg)
+            desk_ok, start_ok = create_shortcuts(
+                exe, "client", cfg, room_name=room)
+            return {"task_ok": task_ok, "exe": exe, "desk_ok": desk_ok,
+                    "start_ok": start_ok, "task_name": task_name}
 
         def _worker():
-            try:
-                slug = _sanitize_name(room)
-                exe = _copy_exe("client", INSTALL_DIR)
-                cfg = INSTALL_DIR / f"client_config_{slug}.toml"
-                write_client_config(cfg, room, sip, port, hotkey)
-                task_name = f"{TASK_CLIENT}_{slug}"
-                task_ok = register_task(task_name, exe, "client", cfg)
-                desk_ok, start_ok = create_shortcuts(
-                    exe, "client", cfg, room_name=room)
-                self.after(0, lambda: self._finish(task_ok, "client", exe,
-                                                    desk_ok, start_ok,
-                                                    task_name=task_name))
-            except Exception as exc:
-                self.after(0, lambda: self._error(str(exc)))
+            result = safe_install("client", _install_fn, room_slug=slug)
+            if result["ok"]:
+                self.after(0, lambda: self._finish(
+                    result["task_ok"], "client", result["exe"],
+                    result["desk_ok"], result["start_ok"],
+                    task_name=result["task_name"]))
+            else:
+                self.after(0, lambda: self._error(result["error"]))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_overwrite_dialog(self, role: str, info: dict,
+                               on_confirm) -> None:
+        """Show a warning page when a previous installation is detected."""
+        self._clear()
+        role_de = "Server" if role == "server" else "Client"
+
+        tk.Label(self, text="⚠  Vorhandene Installation erkannt",
+                 font=("Arial", 16, "bold"), bg=self._BG,
+                 fg=self._AMBER).pack(pady=(40, 20))
+
+        details = []
+        if info["exe_exists"]:
+            details.append(f"✔  {role_de}-Programm ist bereits installiert")
+        if info["task_exists"]:
+            details.append(f"✔  Autostart-Aufgabe vorhanden: {info['task_name']}")
+        if info["process_running"]:
+            details.append(f"✔  {role_de}-Prozess läuft gerade")
+
+        for line in details:
+            tk.Label(self, text=line, font=("Arial", 11),
+                     bg=self._BG, fg=self._FG).pack(anchor="w", padx=60)
+
+        tk.Label(self, text=("\nDie bestehende Installation wird gestoppt\n"
+                             "und durch die neue ersetzt.\n\n"
+                             "Möchten Sie fortfahren?"),
+                 font=("Arial", 11), bg=self._BG, fg=self._FG,
+                 justify="center").pack(pady=20)
+
+        btn_frm = tk.Frame(self, bg=self._BG)
+        btn_frm.pack(pady=10)
+
+        tk.Button(btn_frm, text="Ja, überschreiben",
+                  font=("Arial", 12, "bold"),
+                  bg=self._ACCENT, fg="white", relief="flat",
+                  padx=20, pady=8,
+                  command=on_confirm).grid(row=0, column=0, padx=10)
+
+        tk.Button(btn_frm, text="Abbrechen",
+                  font=("Arial", 12),
+                  bg=self._BLUE, fg=self._FG, relief="flat",
+                  padx=20, pady=8,
+                  command=self._build_role_page).grid(row=0, column=1, padx=10)
 
     def _show_progress(self, msg: str) -> None:
         self._clear()
@@ -776,6 +1517,255 @@ class InstallerApp(tk.Tk):
 
 
 # ---------------------------------------------------------------------------
+# GUI — uninstaller window
+# ---------------------------------------------------------------------------
+
+class UninstallerApp(tk.Tk):
+    """Tkinter-based uninstaller GUI."""
+
+    _BG     = "#1a1a2e"
+    _FG     = "#e0e0e0"
+    _BLUE   = "#0f3460"
+    _ACCENT = "#e94560"
+    _GREEN  = "#00b894"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.title(f"Alarmsystem — Deinstallation  v{__version__}")
+        self.resizable(True, True)
+        self.configure(bg=self._BG)
+        self._center(500, 560)
+        self.minsize(400, 400)
+        self._build_main_page()
+
+    def _center(self, w: int, h: int) -> None:
+        x = (self.winfo_screenwidth() - w) // 2
+        y = (self.winfo_screenheight() - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _build_main_page(self) -> None:
+        self._clear()
+
+        tk.Label(self, text="Alarmsystem deinstallieren",
+                 font=("Arial", 18, "bold"), bg=self._BG,
+                 fg=self._ACCENT).pack(pady=(30, 5))
+        tk.Label(self, text="Wählen Sie aus, was deinstalliert werden soll:",
+                 font=("Arial", 10), bg=self._BG,
+                 fg=self._FG).pack(pady=(0, 15))
+
+        # Server checkbox
+        self._server_var = tk.BooleanVar(value=False)
+        server_installed = is_server_installed()
+
+        srv_frm = tk.Frame(self, bg=self._BG)
+        srv_frm.pack(fill="x", padx=40, pady=4)
+        cb = tk.Checkbutton(
+            srv_frm, text="Server deinstallieren",
+            variable=self._server_var,
+            font=("Arial", 11), bg=self._BG, fg=self._FG,
+            selectcolor="#333", activebackground=self._BG,
+            state="normal" if server_installed else "disabled",
+        )
+        cb.pack(side="left")
+        if not server_installed:
+            tk.Label(srv_frm, text="(nicht installiert)",
+                     font=("Arial", 9), bg=self._BG, fg="#888").pack(side="left", padx=6)
+
+        # Client checkboxes (scrollable)
+        self._client_vars: list[tuple[tk.BooleanVar, str]] = []
+        clients = find_installed_clients()
+
+        # Also find orphan shortcuts on desktop
+        self._orphan_shortcuts: list[Path] = []
+        desktop = Path(os.environ.get("USERPROFILE", "C:\\Users\\Public")) / "Desktop"
+        for lnk in desktop.glob("Alarm Client*"):
+            self._orphan_shortcuts.append(lnk)
+        for lnk in desktop.glob("Alarm Server*"):
+            self._orphan_shortcuts.append(lnk)
+        for lnk in desktop.glob("Alarmsystem deinstallieren*"):
+            self._orphan_shortcuts.append(lnk)
+
+        has_items = clients or self._orphan_shortcuts
+
+        if has_items:
+            scroll_container = tk.Frame(self, bg=self._BG)
+            scroll_container.pack(fill="both", expand=True, padx=40, pady=(5, 5))
+
+            canvas = tk.Canvas(scroll_container, bg=self._BG, highlightthickness=0)
+            scrollbar = ttk.Scrollbar(scroll_container, orient=tk.VERTICAL,
+                                      command=canvas.yview)
+            inner_frm = tk.Frame(canvas, bg=self._BG)
+
+            inner_frm.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+            )
+            canvas.create_window((0, 0), window=inner_frm, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+            canvas.bind_all("<MouseWheel>",
+                            lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+
+            if clients:
+                tk.Label(inner_frm, text="Clients:", font=("Arial", 11, "bold"),
+                         bg=self._BG, fg=self._FG).pack(anchor="w", pady=(5, 2))
+
+                for client in clients:
+                    var = tk.BooleanVar(value=False)
+                    tk.Checkbutton(
+                        inner_frm, text=client["room"],
+                        variable=var,
+                        font=("Arial", 10), bg=self._BG, fg=self._FG,
+                        selectcolor="#333", activebackground=self._BG,
+                    ).pack(anchor="w", pady=1, padx=15)
+                    self._client_vars.append((var, client["slug"]))
+
+            if self._orphan_shortcuts:
+                tk.Label(inner_frm, text="Verknüpfungen auf dem Desktop:",
+                         font=("Arial", 11, "bold"),
+                         bg=self._BG, fg=self._FG).pack(anchor="w", pady=(10, 2))
+
+                self._shortcut_var = tk.BooleanVar(value=False)
+                for lnk in self._orphan_shortcuts:
+                    tk.Label(inner_frm, text=f"  • {lnk.stem}",
+                             font=("Arial", 9), bg=self._BG,
+                             fg="#888").pack(anchor="w", padx=15)
+
+                tk.Checkbutton(
+                    inner_frm, text="Alle Verknüpfungen entfernen",
+                    variable=self._shortcut_var,
+                    font=("Arial", 10), bg=self._BG, fg=self._FG,
+                    selectcolor="#333", activebackground=self._BG,
+                ).pack(anchor="w", pady=(4, 2), padx=15)
+        else:
+            self._shortcut_var = None
+            tk.Label(self, text="Nichts zu deinstallieren.",
+                     font=("Arial", 10), bg=self._BG,
+                     fg="#888").pack(pady=(10, 0))
+
+        # Separator
+        tk.Frame(self, bg="#333333", height=1).pack(fill="x", padx=20, pady=(5, 0))
+
+        # Buttons (always visible at bottom)
+        btn_frm = tk.Frame(self, bg=self._BG)
+        btn_frm.pack(pady=15)
+
+        tk.Button(btn_frm, text="Deinstallieren",
+                  font=("Arial", 13, "bold"),
+                  bg=self._ACCENT, fg="white", relief="flat",
+                  padx=20, pady=8, cursor="hand2",
+                  command=self._do_uninstall).grid(row=0, column=0, padx=10)
+
+        tk.Button(btn_frm, text="Abbrechen",
+                  font=("Arial", 12),
+                  bg=self._BLUE, fg=self._FG, relief="flat",
+                  padx=20, pady=8,
+                  command=self.destroy).grid(row=0, column=1, padx=10)
+
+    def _do_uninstall(self) -> None:
+        # Collect selections
+        do_server = self._server_var.get()
+        do_clients = [(slug, var.get()) for var, slug in self._client_vars if var.get()]
+        do_shortcuts = getattr(self, "_shortcut_var", None) and self._shortcut_var.get()
+
+        if not do_server and not do_clients and not do_shortcuts:
+            messagebox.showwarning("Hinweis",
+                                   "Bitte wählen Sie mindestens eine Komponente aus.")
+            return
+
+        # Confirm
+        parts = []
+        if do_server:
+            parts.append("Server")
+        for slug, _ in do_clients:
+            parts.append(f"Client ({slug})")
+        if do_shortcuts:
+            parts.append(f"{len(self._orphan_shortcuts)} Verknüpfung(en)")
+        msg = "Folgende Komponenten werden deinstalliert:\n\n"
+        msg += "\n".join(f"  • {p}" for p in parts)
+        msg += "\n\nFortfahren?"
+
+        if not messagebox.askyesno("Bestätigung", msg):
+            return
+
+        self._show_progress()
+
+        def _worker():
+            all_actions = []
+            if do_server:
+                all_actions += uninstall("server")
+            for slug, _ in do_clients:
+                all_actions += uninstall("client", slug)
+            if do_shortcuts:
+                for lnk in self._orphan_shortcuts:
+                    try:
+                        lnk.unlink()
+                        all_actions.append(f"Verknüpfung {lnk.stem} entfernt")
+                    except Exception:
+                        pass
+            self.after(0, lambda: self._show_result(all_actions))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_progress(self) -> None:
+        self._clear()
+        tk.Label(self, text="Deinstallation läuft…",
+                 font=("Arial", 14), bg=self._BG,
+                 fg=self._FG).pack(pady=60)
+        bar = ttk.Progressbar(self, mode="indeterminate", length=300)
+        bar.pack()
+        bar.start(10)
+
+    def _show_result(self, actions: list[str]) -> None:
+        self._clear()
+
+        if actions:
+            tk.Label(self, text="✔  Deinstallation abgeschlossen",
+                     font=("Arial", 16, "bold"), bg=self._BG,
+                     fg=self._GREEN).pack(pady=(20, 10))
+
+            # Scrollable action list
+            scroll_frm = tk.Frame(self, bg=self._BG)
+            scroll_frm.pack(fill="both", expand=True, padx=20, pady=(0, 5))
+
+            canvas = tk.Canvas(scroll_frm, bg=self._BG, highlightthickness=0)
+            scrollbar = ttk.Scrollbar(scroll_frm, orient=tk.VERTICAL,
+                                      command=canvas.yview)
+            inner = tk.Frame(canvas, bg=self._BG)
+            inner.bind("<Configure>",
+                       lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+            canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            canvas.bind_all("<MouseWheel>",
+                            lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+
+            for action in actions:
+                tk.Label(inner, text=f"  • {action}",
+                         font=("Arial", 10), bg=self._BG,
+                         fg=self._FG).pack(anchor="w", padx=10)
+        else:
+            tk.Label(self, text="Keine Änderungen vorgenommen.",
+                     font=("Arial", 14), bg=self._BG,
+                     fg="#888").pack(pady=60)
+
+        # Button always visible at bottom
+        tk.Frame(self, bg="#333333", height=1).pack(fill="x", padx=20)
+        tk.Button(self, text="Schließen", font=("Arial", 12),
+                  bg=self._BLUE, fg=self._FG, relief="flat",
+                  padx=20, pady=8,
+                  command=self.destroy).pack(pady=15)
+
+    def _clear(self) -> None:
+        for w in self.winfo_children():
+            w.destroy()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -803,21 +1793,29 @@ def main() -> None:
         client_main()
         return
 
+    # Parse installer flags
+    dev_mode = "--dev" in sys.argv
+
     # Otherwise we're running as the installer — request UAC elevation.
     if sys.platform == "win32":
         try:
             import ctypes
             if not ctypes.windll.shell32.IsUserAnAdmin():
-                # Re-launch with elevation
+                # Re-launch with elevation, preserving the full argv
+                script = sys.argv[0]
+                extra = " ".join(f'"{a}"' for a in sys.argv[1:])
+                args = f'"{script}" {extra}'.strip()
                 ctypes.windll.shell32.ShellExecuteW(
-                    None, "runas", sys.executable,
-                    " ".join(f'"{a}"' for a in sys.argv), None, 1
+                    None, "runas", sys.executable, args, None, 1
                 )
                 sys.exit(0)
         except Exception:
             pass  # If elevation fails, continue anyway
 
-    app = InstallerApp()
+    if "--uninstall" in sys.argv:
+        app = UninstallerApp()
+    else:
+        app = InstallerApp(dev_mode=dev_mode)
     app.mainloop()
 
 

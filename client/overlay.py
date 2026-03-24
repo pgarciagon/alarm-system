@@ -17,6 +17,7 @@ import logging
 import queue
 import sys
 import tkinter as tk
+from tkinter import ttk
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Optional
@@ -492,15 +493,16 @@ class OverlayManager:
         win.title(f"Alarmsystem \u2014 Status  v{__version__}")
         set_window_icon(win, "alarm_client.ico")
         win.configure(bg=self._ST_BG)
-        win.geometry("350x340")
+        win.geometry("420x340")
+        win.minsize(420, 250)
         win.resizable(True, True)
-        # Hide from taskbar — Windows only (-toolwindow not supported on macOS)
-        if sys.platform == "win32":
-            win.attributes("-toolwindow", True)
         win.protocol("WM_DELETE_WINDOW", self._minimize_status)
+        # Intercept minimize (iconify) to send to system tray instead
+        win.bind("<Unmap>", lambda e: self._on_minimize(e))
 
         # Header
-        header = tk.Frame(win, bg=self._ST_HEADER_BG, pady=8)
+        self._header = tk.Frame(win, bg=self._ST_HEADER_BG, pady=8)
+        header = self._header
         header.pack(fill="x")
 
         # Title row with buttons
@@ -525,51 +527,15 @@ class OverlayManager:
             command=self._minimize_status,
         ).pack(side="right")
 
-        # Info row: server label + scan button + hotkey + mute button
-        info_row = tk.Frame(header, bg=self._ST_HEADER_BG)
-        info_row.pack(fill="x", padx=10, pady=(4, 0))
-
-        if self._server_info:
-            self._server_info_label = tk.Label(
-                info_row, text=f"Server: {self._server_info}",
-                font=("Arial", 9), bg=self._ST_HEADER_BG, fg="#888888",
-            )
-            self._server_info_label.pack(side="left")
-
         _make_btn(
-            info_row, text="🔍 Suchen", bg="#1a3a5c", fg=self._ST_FG,
-            command=self._scan_server_dialog,
-            font=("Arial", 8), padx=6, pady=1,
-        ).pack(side="left", padx=(6, 0))
+            title_row, text="Einstellungen", bg="#1a3a5c", fg=self._ST_FG,
+            command=self._toggle_settings_panel,
+            font=("Arial", 9), padx=6, pady=2,
+        ).pack(side="right", padx=(0, 4))
 
-        # Mute toggle button — stored so we can update its label
-        self._mute_btn_canvas = _make_btn(
-            info_row, text="🔔 Ton an", bg="#1a3a5c", fg=self._ST_FG,
-            command=self._toggle_mute,
-            font=("Arial", 8), padx=6, pady=1,
-        )
-        self._mute_btn_canvas.pack(side="left", padx=(4, 0))
-
-        # Auto-start toggle
+        # Initialize settings state (used by settings dialog)
         self._autostart_enabled = is_autostart_enabled("client", self._room_name)
-        self._autostart_canvas = _make_btn(
-            info_row,
-            text=self._autostart_btn_text(),
-            bg="#1a3a5c" if self._autostart_enabled else "#3a1a1a",
-            fg=self._ST_FG,
-            command=self._toggle_autostart,
-            font=("Arial", 8), padx=6, pady=1,
-        )
-        self._autostart_canvas.pack(side="left", padx=(4, 0))
-
-        if self._hotkey:
-            self._hotkey_label = tk.Label(
-                info_row, text=f"Tastenkürzel: {self._hotkey.upper()}",
-                font=("Arial", 9, "bold"), bg=self._ST_HEADER_BG, fg="#fdcb6e",
-                cursor="hand2",
-            )
-            self._hotkey_label.pack(side="right")
-            self._hotkey_label.bind("<Button-1>", lambda _: self._edit_hotkey_dialog())
+        self._settings_dlg = None
 
         # Connection status label
         self._conn_label = tk.Label(
@@ -581,12 +547,33 @@ class OverlayManager:
         # Separator
         tk.Frame(win, bg="#333333", height=1).pack(fill="x")
 
-        # Scrollable client list area
+        # Scrollable client list area (canvas + scrollbar like server dashboard)
         container = tk.Frame(win, bg=self._ST_BG)
         container.pack(fill="both", expand=True, padx=10, pady=(8, 4))
 
-        self._status_frame = tk.Frame(container, bg=self._ST_BG)
-        self._status_frame.pack(fill="both", expand=True)
+        self._status_canvas = tk.Canvas(container, bg=self._ST_BG,
+                                        highlightthickness=0)
+        self._status_scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL,
+                                               command=self._status_canvas.yview)
+        self._status_frame = tk.Frame(self._status_canvas, bg=self._ST_BG)
+
+        self._status_frame.bind(
+            "<Configure>",
+            lambda e: self._status_canvas.configure(
+                scrollregion=self._status_canvas.bbox("all")),
+        )
+        self._status_canvas.create_window((0, 0), window=self._status_frame,
+                                          anchor="nw")
+        self._status_canvas.configure(yscrollcommand=self._status_scrollbar.set)
+
+        self._status_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._status_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            self._status_canvas.yview_scroll(
+                int(-1 * (event.delta / 120)), "units")
+        self._status_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         # Footer (count + version)
         footer_row = tk.Frame(win, bg=self._ST_BG)
@@ -654,7 +641,7 @@ class OverlayManager:
     def _autostart_btn_text(self) -> str:
         if self._autostart_enabled is None:
             return "Autostart: —"
-        return "Autostart: Ein" if self._autostart_enabled else "Autostart: Aus"
+        return "Autostart ON" if self._autostart_enabled else "Autostart OFF"
 
     def _toggle_autostart(self) -> None:
         if self._autostart_enabled is None:
@@ -664,9 +651,20 @@ class OverlayManager:
             self._autostart_enabled = new_state
             if self._autostart_canvas and self._autostart_canvas.winfo_exists():
                 bg = "#1a3a5c" if new_state else "#3a1a1a"
-                self._autostart_canvas.config(bg=bg)
+                new_text = self._autostart_btn_text()
+                # Resize canvas to fit new text
+                font = ("Arial", 8)
+                _probe = tk.Label(self._autostart_canvas, text=new_text, font=font)
+                _probe.update_idletasks()
+                tw, th = _probe.winfo_reqwidth(), _probe.winfo_reqheight()
+                _probe.destroy()
+                w, h = tw + 12, th + 2
+                self._autostart_canvas.config(bg=bg, width=w, height=h)
                 try:
-                    self._autostart_canvas.itemconfig("txt", text=self._autostart_btn_text())
+                    self._autostart_canvas.delete("txt")
+                    self._autostart_canvas.create_text(
+                        w // 2, h // 2, text=new_text,
+                        font=font, fill=self._ST_FG, tags="txt")
                 except Exception:
                     pass
 
@@ -953,10 +951,96 @@ class OverlayManager:
             command=_apply, font=("Arial", 10, "bold"), padx=15, pady=4,
         ).pack(pady=8)
 
+    def _toggle_settings_panel(self) -> None:
+        """Open a settings dialog window."""
+        if self._settings_dlg and self._settings_dlg.winfo_exists():
+            self._settings_dlg.lift()
+            return
+
+        bg = "#1a1a2e"
+        fg = self._ST_FG
+        dlg = tk.Toplevel(self._status_win)
+        dlg.title("Einstellungen")
+        dlg.configure(bg=bg)
+        dlg.geometry("320x280")
+        dlg.resizable(False, False)
+        dlg.transient(self._status_win)
+        dlg.grab_set()
+        self._settings_dlg = dlg
+
+        tk.Label(dlg, text="Einstellungen", font=("Arial", 14, "bold"),
+                 bg=bg, fg="#e94560").pack(pady=(15, 10))
+
+        # Server
+        srv_frm = tk.Frame(dlg, bg=bg)
+        srv_frm.pack(fill="x", padx=20, pady=4)
+        tk.Label(srv_frm, text=f"Server: {self._server_info}",
+                 font=("Arial", 10), bg=bg, fg=fg).pack(side="left")
+        _make_btn(srv_frm, text="Suchen", bg="#1a3a5c", fg=fg,
+                  command=lambda: [dlg.destroy(), self._scan_server_dialog()],
+                  font=("Arial", 8), padx=6, pady=1,
+                  ).pack(side="right")
+
+        # Hotkey
+        hk_frm = tk.Frame(dlg, bg=bg)
+        hk_frm.pack(fill="x", padx=20, pady=4)
+        self._hotkey_label = tk.Label(
+            hk_frm, text=f"Tastenkürzel: {self._hotkey.upper()}",
+            font=("Arial", 10), bg=bg, fg="#fdcb6e",
+        )
+        self._hotkey_label.pack(side="left")
+        _make_btn(hk_frm, text="Ändern", bg="#1a3a5c", fg=fg,
+                  command=lambda: [dlg.destroy(), self._edit_hotkey_dialog()],
+                  font=("Arial", 8), padx=6, pady=1,
+                  ).pack(side="right")
+
+        # Mute toggle
+        mute_frm = tk.Frame(dlg, bg=bg)
+        mute_frm.pack(fill="x", padx=20, pady=4)
+        tk.Label(mute_frm, text="Alarmton:",
+                 font=("Arial", 10), bg=bg, fg=fg).pack(side="left")
+        self._mute_btn_canvas = _make_btn(
+            mute_frm, text="Ton an", bg="#1a3a5c", fg=fg,
+            command=self._toggle_mute,
+            font=("Arial", 9), padx=8, pady=2,
+        )
+        self._mute_btn_canvas.pack(side="right")
+
+        # Autostart toggle
+        auto_frm = tk.Frame(dlg, bg=bg)
+        auto_frm.pack(fill="x", padx=20, pady=4)
+        tk.Label(auto_frm, text="Autostart:",
+                 font=("Arial", 10), bg=bg, fg=fg).pack(side="left")
+        self._autostart_canvas = _make_btn(
+            auto_frm,
+            text=self._autostart_btn_text(),
+            bg="#1a3a5c" if self._autostart_enabled else "#3a1a1a",
+            fg=fg,
+            command=self._toggle_autostart,
+            font=("Arial", 9), padx=8, pady=2,
+        )
+        self._autostart_canvas.pack(side="right")
+
+        # OK button
+        _make_btn(dlg, text="Schließen", bg="#00b894", fg="white",
+                  command=dlg.destroy,
+                  font=("Arial", 11, "bold"), padx=20, pady=6,
+                  ).pack(pady=(20, 10))
+
     def _minimize_status(self) -> None:
         """Hide the status window (keep running in tray)."""
         if self._status_win and self._status_win.winfo_exists():
             self._status_win.withdraw()
+
+    def _on_minimize(self, event) -> None:
+        """Intercept the minimize button to send to system tray instead."""
+        try:
+            if (event.widget == self._status_win
+                    and self._status_win.winfo_exists()
+                    and self._status_win.state() == "iconic"):
+                self._status_win.after(10, self._status_win.withdraw)
+        except Exception:
+            pass
 
     def _update_status_content(self, clients: list) -> None:
         frame = self._status_frame

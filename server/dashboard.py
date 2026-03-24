@@ -86,9 +86,9 @@ class ServerDashboard:
         self._root.configure(bg=_BG)
         self._root.geometry("700x460")
         self._root.minsize(600, 350)
-        # Hide from taskbar — only show in system tray
-        self._root.attributes("-toolwindow", True)
         self._root.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
+        # Intercept minimize button to send to system tray
+        self._root.bind("<Unmap>", lambda e: self._on_minimize(e))
 
         self._build_config_section()
         self._build_client_section()
@@ -202,11 +202,15 @@ class ServerDashboard:
         # Table header
         hdr = tk.Frame(wrapper, bg=_BLUE, padx=10, pady=6)
         hdr.pack(fill=tk.X)
-        for col, (text, w) in enumerate([("Raum", 14), ("Status", 10), ("Hotkey", 10), ("Heartbeat", 10), ("", 6)]):
-            tk.Label(
+        hdr.columnconfigure(0, weight=1, minsize=80)
+        for col, (text, w) in enumerate([("Raum", 0), ("Status", 10), ("Hotkey", 10), ("Heartbeat", 10), ("", 6)]):
+            lbl = tk.Label(
                 hdr, text=text, font=("Arial", 10, "bold"),
-                fg=_FG, bg=_BLUE, anchor="w", width=w,
-            ).grid(row=0, column=col, sticky="w")
+                fg=_FG, bg=_BLUE, anchor="w",
+            )
+            if w:
+                lbl.config(width=w)
+            lbl.grid(row=0, column=col, sticky="ew" if col == 0 else "w")
 
         # Scrollable client list
         canvas = tk.Canvas(wrapper, bg=_BG, highlightthickness=0)
@@ -261,13 +265,14 @@ class ServerDashboard:
                 row_bg = _BG if i % 2 == 0 else _HEADER_BG
                 row = tk.Frame(self._client_frame, bg=row_bg, padx=10, pady=4)
                 row.pack(fill=tk.X)
+                row.columnconfigure(0, weight=1, minsize=80)
 
-                # Room name (clickable to rename)
+                # Room name (clickable to rename) — expands with window
                 room_lbl = tk.Label(
                     row, text=snap.room, font=("Arial", 10),
-                    fg=_FG, bg=row_bg, anchor="w", width=14, cursor="hand2",
+                    fg=_FG, bg=row_bg, anchor="w", cursor="hand2",
                 )
-                room_lbl.grid(row=0, column=0, sticky="w")
+                room_lbl.grid(row=0, column=0, sticky="ew")
                 room_lbl.bind("<Button-1>", lambda _e, r=snap.room: self._edit_room_name(r))
 
                 # Status indicator
@@ -470,6 +475,16 @@ class ServerDashboard:
         """Hide window on close button (keep running in tray)."""
         if self._root:
             self._root.withdraw()
+
+    def _on_minimize(self, event) -> None:
+        """Intercept the minimize button to send to system tray instead."""
+        try:
+            if (event.widget == self._root
+                    and self._root.winfo_exists()
+                    and self._root.state() == "iconic"):
+                self._root.after(10, self._root.withdraw)
+        except Exception:
+            pass
 
     def _show_window(self) -> None:
         """Restore the window from tray.  Called from pystray thread."""

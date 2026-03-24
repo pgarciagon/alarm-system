@@ -60,6 +60,12 @@ class ClientConfig:
     # path to write log file; empty string → log to stdout only
     log_file: str = ""
 
+    # mute state
+    muted: bool = False
+
+    # internal: remembers where this config was loaded from (not serialized)
+    _config_path: Optional[str] = field(default=None, repr=False)
+
 
 # ---------------------------------------------------------------------------
 # Default config file content (written when no file exists)
@@ -109,7 +115,7 @@ def load_server_config(path: Optional[Union[str, Path]] = None) -> ServerConfig:
         if candidate.exists():
             data = _load_toml(candidate)
             section = data.get("server", {})
-            return ServerConfig(**{k: v for k, v in section.items() if hasattr(ServerConfig, k)})
+            return ServerConfig(**{k: v for k, v in section.items() if k in ServerConfig.__dataclass_fields__})
 
     # No file found — write default to cwd so the operator can edit it
     default_path = Path.cwd() / "server_config.toml"
@@ -130,18 +136,27 @@ def load_client_config(path: Optional[Union[str, Path]] = None) -> ClientConfig:
         if candidate.exists():
             data = _load_toml(candidate)
             section = data.get("client", {})
-            return ClientConfig(**{k: v for k, v in section.items() if hasattr(ClientConfig, k)})
+            cfg = ClientConfig(**{k: v for k, v in section.items()
+                                  if k in ClientConfig.__dataclass_fields__ and not k.startswith("_")})
+            cfg._config_path = str(candidate)
+            return cfg
 
     default_path = Path.cwd() / "client_config.toml"
     default_path.write_text(_DEFAULT_CLIENT_TOML.format(hotkey=_default_hotkey()), encoding="utf-8")
     print(f"[config] No client_config.toml found. Created default at {default_path}")
-    return ClientConfig()
+    cfg = ClientConfig()
+    cfg._config_path = str(default_path)
+    return cfg
 
 
 def save_client_config(cfg: ClientConfig, path: Optional[Union[str, Path]] = None) -> None:
     """Persist *cfg* back to client_config.toml (overwrites the file)."""
-    candidates = _resolve_candidates(path, "client_config.toml")
-    target = next((p for p in candidates if p.exists()), candidates[-1])
+    # Use the path the config was loaded from, if available
+    if path is None and cfg._config_path:
+        target = Path(cfg._config_path)
+    else:
+        candidates = _resolve_candidates(path, "client_config.toml")
+        target = next((p for p in candidates if p.exists()), candidates[-1])
     content = (
         "[client]\n"
         f'room_name   = "{cfg.room_name}"\n'
@@ -150,6 +165,7 @@ def save_client_config(cfg: ClientConfig, path: Optional[Union[str, Path]] = Non
         f'hotkey      = "{cfg.hotkey}"\n'
         f'alarm_sound = "{cfg.alarm_sound}"\n'
         f'log_file    = "{cfg.log_file}"\n'
+        f"muted       = {'true' if cfg.muted else 'false'}\n"
     )
     target.write_text(content, encoding="utf-8")
 

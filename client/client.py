@@ -350,6 +350,8 @@ class AlarmClient:
             cfg.room_name = _generate_unique_room_name()
         self.log = _setup_logging(cfg.log_file)
         self._sound = SoundPlayer(cfg.alarm_sound)
+        if cfg.muted:
+            self._sound.set_muted(True)
         self._overlay = OverlayManager(
             stop_sound_cb=self._sound.stop,
             show_gui=show_gui,
@@ -393,6 +395,7 @@ class AlarmClient:
     def _on_hotkey_changed(self, new_hotkey: str) -> None:
         """Called from GUI when user edits hotkey locally."""
         self._core._restart_hotkey(new_hotkey)
+        save_client_config(self.cfg)
         self._core.send_register_update()
 
     def _on_room_name_changed(self, new_name: str) -> None:
@@ -409,6 +412,8 @@ class AlarmClient:
     def _on_toggle_mute(self, muted: bool) -> None:
         """Called from GUI when user toggles silent mode."""
         self._sound.set_muted(muted)
+        self.cfg.muted = muted
+        save_client_config(self.cfg)
 
     def stop(self) -> None:
         """Signal both the overlay and the async core to shut down."""
