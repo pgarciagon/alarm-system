@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from common.config import ClientConfig, load_client_config, save_client_config
 from common.protocol import (
+    AlarmAckMsg,
     AlarmMsg,
     ClientDownMsg,
     ClientUpMsg,
@@ -48,14 +49,17 @@ from common.protocol import (
     RegisterMsg,
     SetHotkeyMsg,
     SetRoomNameMsg,
+    StopAlarmMsg,
     decode,
     encode,
     MSG_ALARM,
+    MSG_ALARM_ACK,
     MSG_CLIENT_DOWN,
     MSG_CLIENT_LIST,
     MSG_CLIENT_UP,
     MSG_SET_HOTKEY,
     MSG_SET_ROOM_NAME,
+    MSG_STOP_ALARM,
 )
 from client.hotkey import make_hotkey_listener
 from client.overlay import OverlayManager
@@ -116,6 +120,8 @@ class _AsyncCore:
         self._fallback_hotkey = fallback_hotkey
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._alarm_pending: Optional[asyncio.Event] = None
+        self._stop_alarm_pending: Optional[asyncio.Event] = None
+        self._alarm_active = False
         self._ws = None  # current websocket (set while connected)
         self._running = True
 
@@ -149,6 +155,7 @@ class _AsyncCore:
 
     async def _main(self) -> None:
         self._alarm_pending = asyncio.Event()
+        self._stop_alarm_pending = asyncio.Event()
         self._start_hotkey()
         await self._connect_loop()
 
@@ -180,9 +187,26 @@ class _AsyncCore:
         save_client_config(self.cfg)
 
     def _on_hotkey_pressed(self) -> None:
-        self.log.info("Hotkey pressed — queuing alarm for room %r", self.cfg.room_name)
-        if self._loop and self._alarm_pending:
-            self._loop.call_soon_threadsafe(self._alarm_pending.set)
+        if self._alarm_active:
+            self.log.info("Hotkey pressed — stopping alarm for room %r", self.cfg.room_name)
+            if self._loop and self._stop_alarm_pending:
+                self._loop.call_soon_threadsafe(self._stop_alarm_pending.set)
+        else:
+            self.log.info("Hotkey pressed — queuing alarm for room %r", self.cfg.room_name)
+            if self._loop and self._alarm_pending:
+                self._loop.call_soon_threadsafe(self._alarm_pending.set)
+
+    def send_alarm(self) -> None:
+        """Public method for overlay button to trigger alarm."""
+        if not self._alarm_active:
+            self._on_hotkey_pressed()
+
+    def send_stop_alarm(self) -> None:
+        """Public method for overlay button to stop alarm."""
+        if self._alarm_active:
+            self.log.info("Stop alarm requested from button")
+            if self._loop and self._stop_alarm_pending:
+                self._loop.call_soon_threadsafe(self._stop_alarm_pending.set)
 
     # ------------------------------------------------------------------
     # Connection loop
@@ -222,6 +246,7 @@ class _AsyncCore:
                         self._receive_loop(ws),
                         self._heartbeat_loop(ws),
                         self._alarm_send_loop(ws),
+                        self._stop_alarm_send_loop(ws),
                     )
 
             except (ConnectionClosed, WebSocketException, OSError) as exc:
@@ -267,8 +292,22 @@ class _AsyncCore:
 
             if msg.type == MSG_ALARM:
                 self.log.info("ALARM received from room %r", msg.room)  # type: ignore[union-attr]
+                # Receiver only — show overlay + sound, button stays "ALARM SENDEN!"
                 self._overlay.show_alarm(msg.room)  # type: ignore[union-attr]
                 self._sound.play()
+            elif msg.type == MSG_STOP_ALARM:
+                self.log.info("STOP ALARM received from room %r", msg.room)  # type: ignore[union-attr]
+                self._alarm_active = False
+                self._overlay.set_alarm_active(False)
+                self._overlay.hide_alarm()
+                self._sound.stop()
+            elif msg.type == MSG_ALARM_ACK:
+                # Only the sender receives this — show "ALARM STOPPEN" button
+                count = msg.count  # type: ignore[union-attr]
+                self.log.info("Alarm acknowledged — sent to %d client(s)", count)
+                self._alarm_active = True
+                self._overlay.set_alarm_active(True)
+                self._overlay.show_alarm_sent_banner(count)
             elif msg.type == MSG_CLIENT_DOWN:
                 self.log.warning("Client down: room %r", msg.room)  # type: ignore[union-attr]
                 self._overlay.show_banner(msg.room, up=False)  # type: ignore[union-attr]
@@ -321,6 +360,17 @@ class _AsyncCore:
             except ConnectionClosed:
                 break
 
+    async def _stop_alarm_send_loop(self, ws) -> None:
+        stop_msg = encode(StopAlarmMsg(room=self.cfg.room_name))
+        while True:
+            await self._stop_alarm_pending.wait()  # type: ignore[union-attr]
+            self._stop_alarm_pending.clear()  # type: ignore[union-attr]
+            try:
+                await ws.send(stop_msg)
+                self.log.info("Stop alarm sent for room %r", self.cfg.room_name)
+            except ConnectionClosed:
+                break
+
     # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
@@ -363,6 +413,8 @@ class AlarmClient:
             change_room_name_cb=self._on_room_name_changed,
             reconnect_cb=self._on_server_changed,
             toggle_mute_cb=self._on_toggle_mute,
+            send_alarm_cb=self._send_alarm,
+            send_stop_alarm_cb=self._send_stop_alarm,
         )
         self._core = _AsyncCore(
             cfg=cfg,
@@ -414,6 +466,14 @@ class AlarmClient:
         self._sound.set_muted(muted)
         self.cfg.muted = muted
         save_client_config(self.cfg)
+
+    def _send_alarm(self) -> None:
+        """Called from overlay ALARM button."""
+        self._core.send_alarm()
+
+    def _send_stop_alarm(self) -> None:
+        """Called from overlay STOP ALARM button."""
+        self._core.send_stop_alarm()
 
     def stop(self) -> None:
         """Signal both the overlay and the async core to shut down."""

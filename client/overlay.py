@@ -105,6 +105,14 @@ class _UpdateRoomName:
 class _UpdateServerInfo:
     info: str
 
+@dataclass
+class _SetAlarmActive:
+    active: bool
+
+@dataclass
+class _ShowAlarmSentBanner:
+    count: int
+
 
 # ---------------------------------------------------------------------------
 # Overlay manager  (main-thread only)
@@ -127,7 +135,8 @@ class OverlayManager:
                  room_name: str = "", server_info: str = "",
                  stop_client_cb=None, hotkey: str = "",
                  change_hotkey_cb=None, change_room_name_cb=None,
-                 reconnect_cb=None, toggle_mute_cb=None) -> None:
+                 reconnect_cb=None, toggle_mute_cb=None,
+                 send_alarm_cb=None, send_stop_alarm_cb=None) -> None:
         self._q: queue.Queue = queue.Queue()
         self._root: Optional[tk.Tk] = None
         self._alarm_win: Optional[tk.Toplevel] = None
@@ -145,6 +154,11 @@ class OverlayManager:
         self._reconnect_cb = reconnect_cb          # called with new_ip str
         self._toggle_mute_cb = toggle_mute_cb      # called with bool
         self._muted = False
+        self._send_alarm_cb = send_alarm_cb
+        self._send_stop_alarm_cb = send_stop_alarm_cb
+        self._alarm_active = False
+        self._alarm_btn = None
+        self._alarm_btn_flash_job = None
         self._tray: Optional[TrayIcon] = None
         self._status_win: Optional[tk.Toplevel] = None
         self._status_frame: Optional[tk.Frame] = None
@@ -166,6 +180,12 @@ class OverlayManager:
 
     def show_banner(self, room: str, up: bool) -> None:
         self._q.put(_ShowBanner(room=room, up=up))
+
+    def set_alarm_active(self, active: bool) -> None:
+        self._q.put(_SetAlarmActive(active=active))
+
+    def show_alarm_sent_banner(self, count: int) -> None:
+        self._q.put(_ShowAlarmSentBanner(count=count))
 
     def update_client_list(self, clients: list) -> None:
         self._q.put(_UpdateClientList(clients=clients))
@@ -268,6 +288,10 @@ class OverlayManager:
             self._server_info = cmd.info
             if self._server_info_label:
                 self._server_info_label.config(text=f"Server: {cmd.info}")
+        elif isinstance(cmd, _SetAlarmActive):
+            self._set_alarm_active(cmd.active)
+        elif isinstance(cmd, _ShowAlarmSentBanner):
+            self._show_alarm_sent_banner(cmd.count)
         elif isinstance(cmd, _Stop):
             if self._tray:
                 self._tray.stop()
@@ -312,6 +336,19 @@ class OverlayManager:
 
         timestamp = datetime.now().strftime("%H:%M:%S")
 
+        # --- Client name (small) top-left ---
+        my_room = getattr(self, '_room_name', '') or ''
+        if my_room:
+            client_lbl = tk.Label(
+                win,
+                text=my_room,
+                font=("Arial", 12),
+                bg=_RED_BRIGHT,
+                fg="#ffcccc",
+                anchor="w",
+            )
+            client_lbl.place(x=10, y=10)
+
         room_lbl = tk.Label(
             win,
             text=f"\u26a0  ALARM \u2014 {room.upper()}  \u26a0",
@@ -333,14 +370,22 @@ class OverlayManager:
         time_lbl.pack()
 
         # Non-blinking dismiss button — use a frame to isolate it from flash
+        # Button is disabled for 500ms after window appears to prevent
+        # click-through cascade when overlays are stacked (local testing)
         btn_frame = tk.Frame(win, bg=_WHITE, padx=3, pady=3)
         btn_frame.pack(pady=40)
+
+        def _safe_dismiss():
+            if not self._esc_armed:
+                return  # Not armed yet, ignore click
+            self._hide_alarm()
+
         dismiss_btn = _make_btn(
             btn_frame,
             text="BESTÄTIGEN  (ESC)",
             bg=_WHITE,
             fg=_RED_BRIGHT,
-            command=self._hide_alarm,
+            command=_safe_dismiss,
             font=("Arial", 24, "bold"),
             padx=30,
             pady=10,
@@ -352,7 +397,30 @@ class OverlayManager:
         win._room_label = room_lbl  # type: ignore[attr-defined]
         win._time_label = time_lbl  # type: ignore[attr-defined]
 
-        win.bind("<Escape>", lambda _e: self._hide_alarm())
+        # --- ESC handling: only respond when THIS window has focus ---
+        self._esc_armed = False
+        def _on_esc(_e):
+            # Only respond if this window is the focused window
+            if not self._esc_armed:
+                return
+            try:
+                focused = win.focus_get()
+                # Only close if focus is on this window or its children
+                if focused is None:
+                    return
+                focused_toplevel = focused.winfo_toplevel()
+                if focused_toplevel is not win:
+                    return
+            except Exception:
+                pass
+            self._hide_alarm()
+
+        def _arm_esc():
+            self._esc_armed = True
+            win.bind("<Escape>", _on_esc)
+            # Also re-bind on focus to ensure ESC always works
+            win.bind("<FocusIn>", lambda _e: win.bind("<Escape>", _on_esc))
+        root.after(500, _arm_esc)
 
         self._alarm_win = win
         self._flash_bright = True
@@ -395,6 +463,71 @@ class OverlayManager:
         except Exception:
             return
         self._flash_job = self._root.after(self.FLASH_MS, self._start_flash)
+
+    # ------------------------------------------------------------------
+    # Alarm button (toggle send/stop)
+    # ------------------------------------------------------------------
+
+    def _on_alarm_btn_click(self) -> None:
+        if self._alarm_active:
+            if self._send_stop_alarm_cb:
+                self._send_stop_alarm_cb()
+        else:
+            if self._send_alarm_cb:
+                self._send_alarm_cb()
+
+    def _set_alarm_active(self, active: bool) -> None:
+        self._alarm_active = active
+        if not self._alarm_btn:
+            return
+        hk = self._hotkey.upper() if self._hotkey else ""
+        if active:
+            self._alarm_btn.config(text=f"ALARM STOPPEN\n({hk})")
+            self._start_alarm_btn_flash()
+        else:
+            if self._alarm_btn_flash_job and self._root:
+                self._root.after_cancel(self._alarm_btn_flash_job)
+                self._alarm_btn_flash_job = None
+            self._alarm_btn.config(text=f"ALARM AUSLÖSEN!\n({hk})", bg="#CC0000")
+
+    def _start_alarm_btn_flash(self) -> None:
+        if not self._alarm_btn or not self._root or not self._alarm_active:
+            return
+        try:
+            current = self._alarm_btn.cget("bg")
+            new_bg = "#7A0000" if current == "#CC0000" else "#CC0000"
+            self._alarm_btn.config(bg=new_bg)
+        except Exception:
+            return
+        self._alarm_btn_flash_job = self._root.after(
+            self.FLASH_MS, self._start_alarm_btn_flash)
+
+    def _show_alarm_sent_banner(self, count: int) -> None:
+        """Show a brief notification at top-right: 'Alarm ausgelöst an X Räume'."""
+        root = self._root
+        if not root:
+            return
+        unit = "Raum" if count == 1 else "Räume"
+        msg = f"Alarm ausgelöst an {count} {unit}"
+        sw = root.winfo_screenwidth()
+        win = tk.Toplevel(root)
+        win.attributes("-topmost", True)
+        win.overrideredirect(True)
+        win.configure(bg="#CC0000")
+        win.geometry(f"380x50+{sw - 390}+10")
+        tk.Label(
+            win, text=msg, font=("Arial", 13, "bold"),
+            bg="#CC0000", fg="white",
+        ).pack(expand=True, fill="both")
+        root.after(4000, lambda: self._destroy_toplevel(win))
+
+    @staticmethod
+    def _destroy_toplevel(win: tk.Toplevel) -> None:
+        try:
+            if win.winfo_exists():
+                win.destroy()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Status banner
@@ -537,12 +670,27 @@ class OverlayManager:
         self._autostart_enabled = is_autostart_enabled("client", self._room_name)
         self._settings_dlg = None
 
-        # Connection status label
-        self._conn_label = tk.Label(
-            win, text="", font=("Arial", 10), bg=self._ST_BG, fg="#888888",
-            anchor="w", padx=10, pady=4,
+        # Alarm button row
+        alarm_row = tk.Frame(header, bg=self._ST_HEADER_BG)
+        alarm_row.pack(fill="x", padx=10, pady=(4, 0))
+
+        hotkey_display = self._hotkey.upper() if self._hotkey else ""
+        self._alarm_btn = tk.Button(
+            alarm_row, text=f"ALARM AUSLÖSEN!\n({hotkey_display})",
+            font=("Arial", 11, "bold"), bg="#CC0000", fg="white",
+            activebackground="#990000", activeforeground="white",
+            relief="flat", padx=15, pady=4,
+            command=self._on_alarm_btn_click,
         )
-        self._conn_label.pack(fill="x")
+        self._alarm_btn.pack(side="left")
+
+        # Connection status (on same row, right side)
+        self._conn_label = tk.Label(
+            alarm_row, text="", font=("Arial", 10),
+            bg=self._ST_HEADER_BG, fg="#888888",
+            anchor="e",
+        )
+        self._conn_label.pack(side="right")
 
         # Separator
         tk.Frame(win, bg="#333333", height=1).pack(fill="x")
@@ -604,9 +752,13 @@ class OverlayManager:
             )
 
     def _refresh_hotkey_label(self) -> None:
-        """Update the hotkey label text."""
+        """Update the hotkey label text and alarm button."""
         if self._hotkey_label and self._hotkey_label.winfo_exists():
             self._hotkey_label.config(text=f"Tastenkürzel: {self._hotkey.upper()}")
+        if self._alarm_btn:
+            hk = self._hotkey.upper() if self._hotkey else ""
+            label = "ALARM STOPPEN" if self._alarm_active else "ALARM AUSLÖSEN!"
+            self._alarm_btn.config(text=f"{label}\n({hk})")
 
     def _refresh_room_name_label(self) -> None:
         """Update the room name label text."""

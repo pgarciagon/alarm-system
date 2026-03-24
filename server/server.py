@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from common.config import ServerConfig, load_server_config
 from common.protocol import (
+    AlarmAckMsg,
     AlarmMsg,
     ClientDownMsg,
     ClientListMsg,
@@ -43,15 +44,18 @@ from common.protocol import (
     RemoveClientMsg,
     SetHotkeyMsg,
     SetRoomNameMsg,
+    StopAlarmMsg,
     decode,
     encode,
     MSG_ALARM,
+    MSG_ALARM_ACK,
     MSG_HEARTBEAT,
     MSG_REGISTER,
     MSG_DISMISS,
     MSG_REMOVE_CLIENT,
     MSG_SET_HOTKEY,
     MSG_SET_ROOM_NAME,
+    MSG_STOP_ALARM,
 )
 
 
@@ -205,10 +209,13 @@ class AlarmServer:
                     await self._on_heartbeat(msg)  # type: ignore[arg-type]
 
                 elif msg.type == MSG_ALARM:
-                    await self._on_alarm(msg)  # type: ignore[arg-type]
+                    await self._on_alarm(ws, msg)  # type: ignore[arg-type]
 
                 elif msg.type == MSG_DISMISS:
                     pass  # reserved for future use
+
+                elif msg.type == MSG_STOP_ALARM:
+                    await self._on_stop_alarm(msg)  # type: ignore[arg-type]
 
                 elif msg.type == MSG_REMOVE_CLIENT:
                     await self._on_remove_client(msg)  # type: ignore[arg-type]
@@ -277,14 +284,29 @@ class AlarmServer:
                     await self._broadcast(ClientUpMsg(room=msg.room), exclude=None)
                     await self._broadcast_client_list()
 
-    async def _on_alarm(self, msg: AlarmMsg) -> None:
+    async def _on_alarm(self, ws: _WS, msg: AlarmMsg) -> None:
         exclude = msg.room if self.cfg.silent_alarm else None
+        # Count recipients (not-down clients, excluding sender if silent)
+        count = sum(
+            1 for r, e in self._clients.items()
+            if not e.is_down and r != exclude
+        )
         self.log.info(
-            "ALARM triggered from room %r — broadcasting to %s",
-            msg.room,
-            "all other clients" if exclude else "all clients (including sender)",
+            "ALARM triggered from room %r — broadcasting to %d client(s)",
+            msg.room, count,
         )
         await self._broadcast(AlarmMsg(room=msg.room), exclude=exclude)
+        # Send acknowledgement back to sender with recipient count
+        try:
+            await ws.send(encode(AlarmAckMsg(room=msg.room, count=count)))
+        except Exception:
+            pass
+
+    async def _on_stop_alarm(self, msg: StopAlarmMsg) -> None:
+        self.log.info(
+            "STOP ALARM from room %r — broadcasting to all clients", msg.room,
+        )
+        await self._broadcast(StopAlarmMsg(room=msg.room), exclude=None)
 
     async def _on_remove_client(self, msg: RemoveClientMsg) -> None:
         async with self._lock:
