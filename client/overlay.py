@@ -1201,7 +1201,7 @@ class OverlayManager:
         dlg = tk.Toplevel(self._status_win)
         dlg.title("Einstellungen")
         dlg.configure(bg=bg)
-        dlg.geometry("320x280")
+        dlg.geometry("320x320")
         dlg.resizable(False, False)
         dlg.transient(self._status_win)
         dlg.grab_set()
@@ -1209,6 +1209,16 @@ class OverlayManager:
 
         tk.Label(dlg, text="Einstellungen", font=("Arial", 14, "bold"),
                  bg=bg, fg="#e94560").pack(pady=(15, 10))
+
+        # Zimmername
+        name_frm = tk.Frame(dlg, bg=bg)
+        name_frm.pack(fill="x", padx=20, pady=4)
+        tk.Label(name_frm, text=f"Zimmername: {self._room_name}",
+                 font=("Arial", 10), bg=bg, fg=fg).pack(side="left")
+        _make_btn(name_frm, text="Ändern", bg="#1a3a5c", fg=fg,
+                  command=lambda: [dlg.destroy(), self._edit_room_name_dialog()],
+                  font=("Arial", 8), padx=6, pady=1,
+                  ).pack(side="right")
 
         # Server
         srv_frm = tk.Frame(dlg, bg=bg)
