@@ -415,6 +415,8 @@ class AlarmClient:
             toggle_mute_cb=self._on_toggle_mute,
             send_alarm_cb=self._send_alarm,
             send_stop_alarm_cb=self._send_stop_alarm,
+            pause_hotkey_cb=self._pause_hotkey,
+            resume_hotkey_cb=self._resume_hotkey,
         )
         self._core = _AsyncCore(
             cfg=cfg,
@@ -444,9 +446,18 @@ class AlarmClient:
         self._core.shutdown()
         bg.join(timeout=3)
 
+    def _pause_hotkey(self) -> None:
+        """Stop the global hotkey listener (called before the edit dialog opens)."""
+        if hasattr(self._core, '_hotkey_listener') and self._core._hotkey_listener:
+            self._core._hotkey_listener.stop()
+
+    def _resume_hotkey(self, hotkey: str) -> None:
+        """Restart the global hotkey listener after the edit dialog closes."""
+        self._core._restart_hotkey(hotkey)
+
     def _on_hotkey_changed(self, new_hotkey: str) -> None:
         """Called from GUI when user edits hotkey locally."""
-        self._core._restart_hotkey(new_hotkey)
+        # Listener already restarted by _resume_hotkey; just persist + notify server.
         save_client_config(self.cfg)
         self._core.send_register_update()
 

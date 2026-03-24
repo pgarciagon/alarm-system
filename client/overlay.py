@@ -183,7 +183,8 @@ class OverlayManager:
                  stop_client_cb=None, hotkey: str = "",
                  change_hotkey_cb=None, change_room_name_cb=None,
                  reconnect_cb=None, toggle_mute_cb=None,
-                 send_alarm_cb=None, send_stop_alarm_cb=None) -> None:
+                 send_alarm_cb=None, send_stop_alarm_cb=None,
+                 pause_hotkey_cb=None, resume_hotkey_cb=None) -> None:
         self._q: queue.Queue = queue.Queue()
         self._root: Optional[tk.Tk] = None
         self._alarm_win: Optional[tk.Toplevel] = None
@@ -203,6 +204,8 @@ class OverlayManager:
         self._muted = False
         self._send_alarm_cb = send_alarm_cb
         self._send_stop_alarm_cb = send_stop_alarm_cb
+        self._pause_hotkey_cb = pause_hotkey_cb    # called before hotkey dialog opens
+        self._resume_hotkey_cb = resume_hotkey_cb  # called with new_hotkey after dialog closes
         self._alarm_active = False
         self._alarm_btn = None
         self._alarm_btn_flash_job = None
@@ -698,7 +701,7 @@ class OverlayManager:
         self._room_name_label.bind("<Button-1>", lambda _: self._edit_room_name_dialog())
 
         _make_btn(
-            title_row, text="Beenden", bg=self._ST_RED, fg="white",
+            title_row, text="Beenden", bg="#3a3a4a", fg="#cccccc",
             command=self._exit_from_tray,
         ).pack(side="right", padx=(4, 0))
 
@@ -1088,6 +1091,13 @@ class OverlayManager:
         """Open a small dialog to edit the hotkey."""
         if not self._status_win:
             return
+
+        # Stop the global hotkey listener BEFORE the dialog opens so the
+        # pynput background thread is cleanly gone before tkinter grabs keys.
+        # This also prevents the current hotkey from firing while the user types.
+        if self._pause_hotkey_cb:
+            self._pause_hotkey_cb()
+
         dlg = tk.Toplevel(self._status_win)
         dlg.title("Tastenkürzel ändern")
         dlg.configure(bg=self._ST_BG)
@@ -1111,36 +1121,57 @@ class OverlayManager:
 
         captured = {"combo": self._hotkey}
 
-        _MODIFIER_KEYSYMS = {
-            "control_l", "control_r", "alt_l", "alt_r", "shift_l", "shift_r",
-            "meta_l", "meta_r", "super_l", "super_r", "caps_lock",
+        # Track pressed modifiers by keysym — reliable across all platforms and
+        # Tk versions (state-bit masks differ between macOS/Windows/Linux).
+        _pressed_mods: set = set()
+        _MOD_KEYSYM = {
+            "meta_l": "cmd", "meta_r": "cmd",        # macOS Command ⌘
+            "alt_l":  "alt", "alt_r":  "alt",        # macOS Option / Windows Alt
+            "control_l": "ctrl", "control_r": "ctrl",
+            "shift_l": "shift", "shift_r": "shift",
+        }
+        _ALL_MOD_KEYSYMS = set(_MOD_KEYSYM) | {
+            "super_l", "super_r", "caps_lock", "num_lock", "scroll_lock",
         }
 
         def _on_key(event):
-            parts = []
-            state = event.state
-            if state & 0x4:   parts.append("ctrl")
-            if state & 0x8:   parts.append("alt")
-            if state & 0x80:  parts.append("cmd")   # macOS Command ⌘
-            if state & 0x1:   parts.append("shift")
-            key = event.keysym.lower()
-            if key not in _MODIFIER_KEYSYMS:
-                parts.append(key)
-            if len(parts) >= 2:
-                combo = "+".join(parts)
+            keysym = event.keysym.lower()
+            mod = _MOD_KEYSYM.get(keysym)
+            if mod:
+                _pressed_mods.add(mod)
+                return
+            if keysym in _ALL_MOD_KEYSYMS:
+                return
+            if keysym == "return" and not _pressed_mods:
+                _apply()
+                return
+            if _pressed_mods:
+                # Build combo: modifiers in fixed order + key
+                order = ["ctrl", "alt", "cmd", "shift"]
+                mods_sorted = [m for m in order if m in _pressed_mods]
+                combo = "+".join(mods_sorted + [keysym])
                 captured["combo"] = combo
                 cap_canvas.itemconfig(cap_text, text=combo)
-            if event.keysym == "Return":
-                _apply()
 
-        # Bind to the dialog window so it works without clicking the canvas
+        def _on_release(event):
+            mod = _MOD_KEYSYM.get(event.keysym.lower())
+            if mod:
+                _pressed_mods.discard(mod)
+
         dlg.bind("<KeyPress>", _on_key)
+        dlg.bind("<KeyRelease>", _on_release)
         dlg.focus_set()
 
         tk.Label(
             dlg, text="(Die Kombination einfach drücken — kein Klick nötig)",
             font=("Arial", 8), bg=self._ST_BG, fg="#888888",
         ).pack()
+
+        def _close(new_hk: str) -> None:
+            """Shared teardown: restart listener then destroy dialog."""
+            if self._resume_hotkey_cb:
+                self._resume_hotkey_cb(new_hk)
+            dlg.destroy()
 
         def _apply():
             new_hk = captured["combo"].strip()
@@ -1149,7 +1180,10 @@ class OverlayManager:
                 self._refresh_hotkey_label()
                 if self._change_hotkey_cb:
                     self._change_hotkey_cb(new_hk)
-            dlg.destroy()
+            _close(self._hotkey)
+
+        # Cancel (X button) also restarts listener with the unchanged hotkey
+        dlg.protocol("WM_DELETE_WINDOW", lambda: _close(self._hotkey))
 
         _make_btn(
             dlg, text="Übernehmen", bg="#00b894", fg="white",

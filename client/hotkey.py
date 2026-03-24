@@ -91,90 +91,82 @@ class HotkeyListener:
 
 class MacHotkeyListener:
     """
-    macOS hotkey listener using pynput.keyboard.Listener (CGEventTap in a
-    background thread).  Avoids GlobalHotKeys which starts its own NSRunLoop
-    and crashes when tkinter already owns the main thread.
+    macOS global hotkey listener.
+
+    Runs pynput.GlobalHotKeys in a *child process* so that any CGEventTap /
+    macOS 26 instability cannot SIGTRAP the main Python process.
+    The subprocess writes "TRIGGERED\\n" to stdout; a daemon reader thread
+    picks that up and calls the callback safely.
     """
 
-    # Map user-facing modifier names → pynput Key sets
-    _MOD_NAMES = ("cmd", "ctrl", "alt", "option", "shift")
+    _MODIFIERS = {"cmd", "ctrl", "alt", "option", "shift"}
 
     def __init__(self, hotkey: str, callback: Callable[[], None]) -> None:
         self._hotkey = hotkey.lower()
         self._callback = callback
-        self._listener = None
-        self._pressed: set = set()
-        self._target_mods: frozenset = frozenset()
-        self._target_key: str = ""
-        self._parse_hotkey()
+        self._proc = None
+        self._reader: threading.Thread | None = None
 
-    def _parse_hotkey(self) -> None:
-        parts = self._hotkey.split("+")
-        mods = [p for p in parts[:-1] if p in self._MOD_NAMES]
-        # normalise "option" → "alt"
-        mods = ["alt" if m == "option" else m for m in mods]
-        self._target_mods = frozenset(mods)
-        self._target_key = parts[-1]
+    # ------------------------------------------------------------------
+    # Format conversion: "cmd+n" → "<cmd>+n"  /  "ctrl+shift+a" → "<ctrl>+<shift>+a"
+    # ------------------------------------------------------------------
+    def _to_pynput(self, hotkey: str) -> str:
+        parts = hotkey.lower().split("+")
+        out = []
+        for p in parts:
+            norm = "alt" if p == "option" else p
+            out.append(f"<{norm}>" if norm in self._MODIFIERS else norm)
+        return "+".join(out)
 
-    def _mod_name(self, key) -> str | None:
+    # ------------------------------------------------------------------
+    # Subprocess management
+    # ------------------------------------------------------------------
+    def start(self) -> None:
+        pynput_hk = self._to_pynput(self._hotkey)
+        script = str(
+            __import__("pathlib").Path(__file__).parent.parent
+            / "common" / "hotkey_subprocess.py"
+        )
         try:
-            from pynput.keyboard import Key
-            if key in (Key.cmd, Key.cmd_l, Key.cmd_r):     return "cmd"
-            if key in (Key.ctrl, Key.ctrl_l, Key.ctrl_r):  return "ctrl"
-            if key in (Key.alt, Key.alt_l, Key.alt_r):     return "alt"
-            if key in (Key.shift, Key.shift_l, Key.shift_r): return "shift"
-        except Exception:  # noqa: BLE001
-            pass
-        return None
+            import subprocess
+            self._proc = subprocess.Popen(
+                [sys.executable, script, pynput_hk],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self._reader = threading.Thread(
+                target=self._read_loop, daemon=True, name="hotkey-reader"
+            )
+            self._reader.start()
+            log.info("macOS hotkey subprocess started for %r (pynput: %r)",
+                     self._hotkey, pynput_hk)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failed to start hotkey subprocess: %s", exc)
 
-    def _key_name(self, key) -> str | None:
+    def _read_loop(self) -> None:
+        """Daemon thread: reads lines from the subprocess stdout."""
+        if self._proc is None or self._proc.stdout is None:
+            return
         try:
-            from pynput.keyboard import KeyCode
-            if isinstance(key, KeyCode) and key.char:
-                return key.char.lower()
-            return key.name.lower()
-        except Exception:  # noqa: BLE001
-            return None
-
-    def _on_press(self, key) -> None:
-        mod = self._mod_name(key)
-        if mod:
-            self._pressed.add(mod)
-        else:
-            if self._pressed == self._target_mods:
-                if self._key_name(key) == self._target_key:
+            for raw in self._proc.stdout:
+                if raw.strip() == b"TRIGGERED":
                     try:
                         self._callback()
                     except Exception as exc:  # noqa: BLE001
                         log.error("Hotkey callback raised: %s", exc)
-
-    def _on_release(self, key) -> None:
-        mod = self._mod_name(key)
-        if mod:
-            self._pressed.discard(mod)
-
-    def start(self) -> None:
-        try:
-            from pynput.keyboard import Listener
-            self._listener = Listener(
-                on_press=self._on_press,
-                on_release=self._on_release,
-            )
-            self._listener.start()
-            log.info("macOS hotkey registered via pynput Listener: %s", self._hotkey)
-        except ImportError:
-            log.error("pynput is not installed. Run: pip install pynput")
-        except Exception as exc:  # noqa: BLE001
-            log.error("Failed to register macOS hotkey %r: %s", self._hotkey, exc)
+        except Exception:  # noqa: BLE001
+            pass  # process ended
 
     def stop(self) -> None:
-        if self._listener is not None:
+        if self._proc is not None:
             try:
-                self._listener.stop()
+                self._proc.terminate()
+                self._proc.wait(timeout=2)
             except Exception as exc:  # noqa: BLE001
-                log.warning("Error stopping pynput listener: %s", exc)
-            self._listener = None
-            log.info("macOS hotkey unregistered: %s", self._hotkey)
+                log.warning("Error stopping hotkey subprocess: %s", exc)
+            self._proc = None
+        self._reader = None
+        log.info("macOS hotkey subprocess stopped: %s", self._hotkey)
 
 
 class _FallbackHotkeyListener:
